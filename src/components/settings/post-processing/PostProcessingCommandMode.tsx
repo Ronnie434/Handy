@@ -4,12 +4,16 @@ import { commands } from "@/bindings";
 
 import { SettingContainer, Textarea } from "@/components/ui";
 import { Button } from "../../ui/Button";
+import { ToggleSwitch } from "../../ui/ToggleSwitch";
 import { ShortcutInput } from "../ShortcutInput";
 import { useSettings } from "../../../hooks/useSettings";
 
 const PostProcessingCommandModeComponent: React.FC = () => {
   const { t } = useTranslation();
-  const { getSetting, refreshSettings } = useSettings();
+  const { getSetting, updateSetting, isUpdating, refreshSettings } =
+    useSettings();
+  const selectionCommands =
+    getSetting("post_process_selection_commands") ?? true;
   const savedPrompt = getSetting("command_mode_prompt") || "";
   const [draft, setDraft] = useState(savedPrompt);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +47,20 @@ const PostProcessingCommandModeComponent: React.FC = () => {
 
   return (
     <>
+      <ToggleSwitch
+        checked={selectionCommands}
+        onChange={(enabled) =>
+          updateSetting("post_process_selection_commands", enabled)
+        }
+        isUpdating={isUpdating("post_process_selection_commands")}
+        label={t("settings.postProcessing.commandMode.selectionCommands.label")}
+        description={t(
+          "settings.postProcessing.commandMode.selectionCommands.description",
+        )}
+        descriptionMode="tooltip"
+        grouped={true}
+      />
+
       <ShortcutInput
         shortcutId="command_mode"
         descriptionMode="tooltip"

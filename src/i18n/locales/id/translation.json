@@ -147,7 +147,7 @@
           },
           "command_mode": {
             "name": "Command Mode Shortcut",
-            "description": "Select text, then use this shortcut and speak an instruction. The rewritten text replaces your selection."
+            "description": "Optional dedicated shortcut for command mode. The post-processing hotkey also does this when text is selected."
           }
         },
         "errors": {
@@ -481,6 +481,10 @@
           "tip": "The selected text is sent inside <text> tags and your instruction inside <instruction> tags. Your custom words are appended as a spelling glossary.",
           "save": "Save Prompt",
           "reset": "Reset to Default"
+        },
+        "selectionCommands": {
+          "label": "Edit Selected Text with the Post-Processing Hotkey",
+          "description": "When text is selected, the post-processing hotkey treats what you say as an instruction for that text (e.g. \"make this shorter\") and replaces it. With nothing selected it dictates as usual. One shortcut does both."
         }
       }
     },

@@ -110,15 +110,20 @@ fn command_mode_available(app: &AppHandle) -> bool {
     true
 }
 
-/// Copies the selection command mode will edit. This runs once recording
-/// stops, not when the shortcut is pressed: while the shortcut is held, the
+/// Reads the selection command mode will edit: through Accessibility when the
+/// app exposes it, otherwise by copying it. This runs once recording stops,
+/// not when the shortcut is pressed: while the shortcut is held, the
 /// synthetic Cmd/Ctrl+C would reach Handy's own shortcut listener and read as
 /// the shortcut being released.
 async fn capture_command_selection(app: &AppHandle) -> Result<String, CommandModeIssue> {
     let handle = app.clone();
     let captured =
-        tauri::async_runtime::spawn_blocking(move || crate::clipboard::capture_selection(&handle))
-            .await;
+        tauri::async_runtime::spawn_blocking(move || match crate::selection::focused_selection() {
+            crate::selection::Selection::Text(text) => Ok(Some(text)),
+            crate::selection::Selection::Empty => Ok(None),
+            crate::selection::Selection::Unknown => crate::clipboard::capture_selection(&handle),
+        })
+        .await;
     match captured {
         Ok(Ok(Some(text))) => {
             debug!("Command mode captured {} chars of selection", text.len());
@@ -134,6 +139,14 @@ async fn capture_command_selection(app: &AppHandle) -> Result<String, CommandMod
             Err(CommandModeIssue::Failed)
         }
     }
+}
+
+/// Whether the post-processing hotkey should check for selected text and run
+/// command mode on it.
+fn selection_commands_apply(settings: &AppSettings) -> bool {
+    settings.post_process_selection_commands
+        && !crate::secure_input::is_enabled_now()
+        && configured_llm(settings).is_some()
 }
 
 /// User message for command mode: the selection and the spoken instruction.
@@ -888,13 +901,21 @@ impl ShortcutAction for TranscribeAction {
                 binding_id
             );
 
-            // Copy the selection first, while it is still selected and before
-            // transcription latency gives the user time to move on.
+            // Read the selection first, while it is still selected and before
+            // transcription latency gives the user time to move on. With
+            // selection commands on, the post-processing hotkey edits selected
+            // text instead of dictating over it.
             let command_selection = if command_mode {
                 Some(capture_command_selection(&ah).await)
+            } else if post_process && selection_commands_apply(&get_settings(&ah)) {
+                capture_command_selection(&ah).await.ok().map(|selection| {
+                    debug!("Text is selected; post-processing hotkey runs command mode");
+                    Ok(selection)
+                })
             } else {
                 None
             };
+            let command_mode = command_selection.is_some();
 
             let stop_recording_time = Instant::now();
             if let Some(samples) = rm.stop_recording(&binding_id, cancel_generation) {

@@ -143,7 +143,7 @@ fn send_copy_on_main_thread(app_handle: &AppHandle) -> Result<(), String> {
 }
 
 /// How long to wait for the target app to answer the copy keystroke.
-const SELECTION_COPY_TIMEOUT: Duration = Duration::from_millis(400);
+const SELECTION_COPY_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Copies the current selection of the focused app by sending Cmd/Ctrl+C,
 /// then restores the user's clipboard. Returns `Ok(None)` when nothing (or

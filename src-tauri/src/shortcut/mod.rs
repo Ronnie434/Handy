@@ -1385,6 +1385,18 @@ pub fn change_command_mode_prompt_setting(app: AppHandle, prompt: String) -> Res
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn change_post_process_selection_commands_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.post_process_selection_commands = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
 /// Restores the built-in command mode prompt and returns it.
 #[tauri::command]
 #[specta::specta]

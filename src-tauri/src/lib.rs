@@ -20,6 +20,7 @@ mod overlay;
 mod paste_tx;
 pub mod portable;
 mod secure_input;
+mod selection;
 mod settings;
 mod shortcut;
 mod signal_handle;
@@ -693,6 +694,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::get_last_detected_app,
             shortcut::change_command_mode_prompt_setting,
             shortcut::reset_command_mode_prompt,
+            shortcut::change_post_process_selection_commands_setting,
             shortcut::update_custom_words,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,

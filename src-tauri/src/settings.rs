@@ -484,6 +484,10 @@ pub struct AppSettings {
     pub post_process_selected_prompt_id: Option<String>,
     #[serde(default)]
     pub post_process_app_rules: Vec<AppPromptRule>,
+    /// When text is selected, the post-processing hotkey runs command mode on
+    /// it instead of dictating, so one shortcut covers both.
+    #[serde(default = "default_post_process_selection_commands")]
+    pub post_process_selection_commands: bool,
     /// System prompt for command mode (voice-editing selected text).
     #[serde(default = "default_command_mode_prompt")]
     pub command_mode_prompt: String,
@@ -565,6 +569,10 @@ fn default_settings_schema_version() -> u32 {
 
 fn default_hold_threshold_ms() -> u64 {
     300
+}
+
+fn default_post_process_selection_commands() -> bool {
+    true
 }
 
 fn default_always_on_microphone() -> bool {
@@ -1076,6 +1084,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
         post_process_app_rules: Vec::new(),
+        post_process_selection_commands: true,
         command_mode_prompt: default_command_mode_prompt(),
         mute_while_recording: false,
         append_trailing_space: false,
