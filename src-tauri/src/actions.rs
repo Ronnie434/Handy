@@ -59,13 +59,10 @@ pub trait ShortcutAction: Send + Sync {
 // Transcribe Action
 struct TranscribeAction {
     post_process: bool,
-    /// Command mode: the recording is an instruction applied to the text that
-    /// was selected when recording started, and the result replaces it.
+    /// Command mode: the recording is an instruction applied to the selected
+    /// text, and the result replaces the selection.
     command_mode: bool,
 }
-
-/// Text captured by command mode at recording start, consumed at stop.
-static COMMAND_SELECTION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Why command mode could not run; each maps to an overlay notice and a
 /// main-window toast.
@@ -95,13 +92,9 @@ fn report_command_mode_issue(app: &AppHandle, issue: CommandModeIssue) {
     let _ = app.emit("command-mode-error", issue.notice());
 }
 
-/// Captures the selection command mode will edit. Returns false (after telling
-/// the user why) when command mode can't run, so no recording starts.
-fn begin_command_mode(app: &AppHandle) -> bool {
-    if let Ok(mut selection) = COMMAND_SELECTION.lock() {
-        *selection = None;
-    }
-
+/// Checks command mode can run before recording starts. Returns false (after
+/// telling the user why) so no recording starts.
+fn command_mode_available(app: &AppHandle) -> bool {
     // Secure input (password fields, Secure Keyboard Entry) blocks the
     // synthetic copy and paste keystrokes, so don't touch that field at all.
     if crate::secure_input::is_enabled_now() {
@@ -114,22 +107,31 @@ fn begin_command_mode(app: &AppHandle) -> bool {
         return false;
     }
 
-    match crate::clipboard::capture_selection(app) {
-        Ok(Some(text)) => {
+    true
+}
+
+/// Copies the selection command mode will edit. This runs once recording
+/// stops, not when the shortcut is pressed: while the shortcut is held, the
+/// synthetic Cmd/Ctrl+C would reach Handy's own shortcut listener and read as
+/// the shortcut being released.
+async fn capture_command_selection(app: &AppHandle) -> Result<String, CommandModeIssue> {
+    let handle = app.clone();
+    let captured =
+        tauri::async_runtime::spawn_blocking(move || crate::clipboard::capture_selection(&handle))
+            .await;
+    match captured {
+        Ok(Ok(Some(text))) => {
             debug!("Command mode captured {} chars of selection", text.len());
-            if let Ok(mut selection) = COMMAND_SELECTION.lock() {
-                *selection = Some(text);
-            }
-            true
+            Ok(text)
         }
-        Ok(None) => {
-            report_command_mode_issue(app, CommandModeIssue::NoSelection);
-            false
+        Ok(Ok(None)) => Err(CommandModeIssue::NoSelection),
+        Ok(Err(e)) => {
+            error!("Command mode could not copy the selection: {}", e);
+            Err(CommandModeIssue::Failed)
         }
         Err(e) => {
-            error!("Command mode could not copy the selection: {}", e);
-            report_command_mode_issue(app, CommandModeIssue::Failed);
-            false
+            error!("Command mode selection task failed: {}", e);
+            Err(CommandModeIssue::Failed)
         }
     }
 }
@@ -229,15 +231,28 @@ async fn run_command_mode(
     }
 }
 
-/// Output for a command mode recording. On failure `final_text` is empty, so
-/// nothing is pasted over the user's selection.
+/// Output for a command mode recording. On failure the user is told why and
+/// `final_text` is empty, so nothing is pasted over their selection.
 async fn process_command_output(
     app: &AppHandle,
     instruction: &str,
-    selection: &str,
+    selection: Result<String, CommandModeIssue>,
 ) -> ProcessedTranscription {
     let settings = get_settings(app);
-    let result = run_command_mode(&settings, selection, instruction).await;
+    let result = match selection {
+        Ok(selection) => run_command_mode(&settings, &selection, instruction).await,
+        Err(issue) => {
+            report_command_mode_issue(app, issue);
+            return ProcessedTranscription {
+                final_text: String::new(),
+                post_processed_text: None,
+                post_process_prompt: None,
+            };
+        }
+    };
+    if result.is_none() {
+        report_command_mode_issue(app, CommandModeIssue::Failed);
+    }
     ProcessedTranscription {
         final_text: result.clone().unwrap_or_default(),
         post_processed_text: result,
@@ -646,7 +661,7 @@ impl ShortcutAction for TranscribeAction {
         // post-processing can apply that app's prompt rule.
         crate::frontmost_app::detect_and_remember();
 
-        if self.command_mode && !begin_command_mode(app) {
+        if self.command_mode && !command_mode_available(app) {
             return;
         }
 
@@ -863,11 +878,6 @@ impl ShortcutAction for TranscribeAction {
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
         let command_mode = self.command_mode;
-        let command_selection = if command_mode {
-            COMMAND_SELECTION.lock().ok().and_then(|mut s| s.take())
-        } else {
-            None
-        };
         let frontmost_app_id = crate::frontmost_app::last_detected().map(|app| app.id);
         let cancel_generation = rm.cancel_generation();
 
@@ -877,6 +887,14 @@ impl ShortcutAction for TranscribeAction {
                 "Starting async transcription task for binding: {}",
                 binding_id
             );
+
+            // Copy the selection first, while it is still selected and before
+            // transcription latency gives the user time to move on.
+            let command_selection = if command_mode {
+                Some(capture_command_selection(&ah).await)
+            } else {
+                None
+            };
 
             let stop_recording_time = Instant::now();
             if let Some(samples) = rm.stop_recording(&binding_id, cancel_generation) {
@@ -966,17 +984,10 @@ impl ShortcutAction for TranscribeAction {
                                 }
                             }
                             let output = async {
-                                match &command_selection {
+                                match command_selection {
                                     Some(selection) => {
                                         process_command_output(&ah, &transcription, selection).await
                                     }
-                                    // Command mode always captures a selection before
-                                    // recording; never paste the instruction itself.
-                                    None if command_mode => ProcessedTranscription {
-                                        final_text: String::new(),
-                                        post_processed_text: None,
-                                        post_process_prompt: None,
-                                    },
                                     None => {
                                         process_transcription_output(
                                             &ah,
@@ -1020,9 +1031,8 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             if processed.final_text.is_empty() {
-                                if command_mode {
-                                    report_command_mode_issue(&ah, CommandModeIssue::Failed);
-                                } else {
+                                // Command mode already showed a notice that hides itself.
+                                if !command_mode {
                                     utils::hide_recording_overlay(&ah);
                                 }
                                 set_tray_state(&ah, TrayIconState::Idle);
