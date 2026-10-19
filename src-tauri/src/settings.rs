@@ -94,6 +94,17 @@ pub struct LLMPrompt {
     pub prompt: String,
 }
 
+/// Routes post-processing to a specific prompt when `app_id` is the frontmost
+/// app at recording start (bundle ID on macOS, process name elsewhere).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Type)]
+pub struct AppPromptRule {
+    pub app_id: String,
+    /// Display name captured when the rule was created; informational only.
+    #[serde(default)]
+    pub app_name: String,
+    pub prompt_id: String,
+}
+
 /// Request format a post-processing endpoint speaks. Built-in providers have a
 /// fixed format; only the custom provider lets the user change it.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
@@ -472,6 +483,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
     #[serde(default)]
+    pub post_process_app_rules: Vec<AppPromptRule>,
+    #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
     pub append_trailing_space: bool,
@@ -826,6 +839,27 @@ fn smart_format_prompt() -> LLMPrompt {
     }
 }
 
+/// Inserts `rule`, replacing any rule for the same app id or for
+/// `previous_app_id` (the rule being edited) in place. App ids compare
+/// case-insensitively, so there is at most one rule per app afterwards.
+pub fn upsert_app_rule(
+    rules: &mut Vec<AppPromptRule>,
+    previous_app_id: Option<&str>,
+    rule: AppPromptRule,
+) {
+    let replaces = |existing: &AppPromptRule| {
+        existing.app_id.eq_ignore_ascii_case(&rule.app_id)
+            || previous_app_id
+                .is_some_and(|previous| existing.app_id.eq_ignore_ascii_case(previous))
+    };
+    let index = rules.iter().position(replaces);
+    rules.retain(|existing| !replaces(existing));
+    match index {
+        Some(index) => rules.insert(index, rule),
+        None => rules.push(rule),
+    }
+}
+
 fn default_transcribe_gpu_device() -> Option<String> {
     None // automatic device selection
 }
@@ -1013,6 +1047,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
+        post_process_app_rules: Vec::new(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),
@@ -1046,6 +1081,31 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// The app rule that applies to `app_id`, if any. Matching ignores ASCII
+    /// case, and rules pointing at a prompt that no longer exists are skipped.
+    pub fn matching_app_rule(&self, app_id: Option<&str>) -> Option<&AppPromptRule> {
+        let app_id = app_id?.trim();
+        if app_id.is_empty() {
+            return None;
+        }
+        self.post_process_app_rules.iter().find(|rule| {
+            rule.app_id.trim().eq_ignore_ascii_case(app_id)
+                && self
+                    .post_process_prompts
+                    .iter()
+                    .any(|prompt| prompt.id == rule.prompt_id)
+        })
+    }
+
+    /// The prompt post-processing should use for `app_id`: the matching app
+    /// rule's prompt, otherwise the selected prompt.
+    pub fn post_process_prompt_id_for_app(&self, app_id: Option<&str>) -> Option<String> {
+        match self.matching_app_rule(app_id) {
+            Some(rule) => Some(rule.prompt_id.clone()),
+            None => self.post_process_selected_prompt_id.clone(),
+        }
+    }
+
     pub fn active_post_process_provider(&self) -> Option<&PostProcessProvider> {
         self.post_process_providers
             .iter()
@@ -1902,6 +1962,121 @@ mod tests {
                 SMART_FORMAT_PROMPT_ID.to_string()
             ]
         );
+    }
+
+    fn rule(app_id: &str, prompt_id: &str) -> AppPromptRule {
+        AppPromptRule {
+            app_id: app_id.to_string(),
+            app_name: app_id.to_string(),
+            prompt_id: prompt_id.to_string(),
+        }
+    }
+
+    fn settings_with_rules(rules: Vec<AppPromptRule>) -> AppSettings {
+        let mut settings = get_default_settings();
+        settings.post_process_selected_prompt_id = Some("default_improve_transcriptions".into());
+        settings.post_process_app_rules = rules;
+        settings
+    }
+
+    #[test]
+    fn app_rule_matches_case_insensitively() {
+        let settings = settings_with_rules(vec![rule(
+            "com.tinyspeck.slackmacgap",
+            SMART_FORMAT_PROMPT_ID,
+        )]);
+
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(Some("com.tinyspeck.slackmacgap")),
+            Some(SMART_FORMAT_PROMPT_ID.to_string())
+        );
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(Some("COM.TinySpeck.SlackMacGap")),
+            Some(SMART_FORMAT_PROMPT_ID.to_string())
+        );
+        let settings = settings_with_rules(vec![rule("Slack.exe", SMART_FORMAT_PROMPT_ID)]);
+        assert!(settings.matching_app_rule(Some("slack.exe")).is_some());
+    }
+
+    #[test]
+    fn no_matching_rule_falls_back_to_selected_prompt() {
+        let settings = settings_with_rules(vec![rule("com.apple.mail", SMART_FORMAT_PROMPT_ID)]);
+
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(Some("com.apple.Notes")),
+            Some("default_improve_transcriptions".to_string())
+        );
+        // No app detected (e.g. Linux) or a blank id never matches.
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(None),
+            Some("default_improve_transcriptions".to_string())
+        );
+        assert!(settings.matching_app_rule(Some("  ")).is_none());
+    }
+
+    #[test]
+    fn rule_with_missing_prompt_is_ignored() {
+        let settings = settings_with_rules(vec![
+            rule("com.apple.mail", "deleted_prompt"),
+            rule("com.apple.MAIL", SMART_FORMAT_PROMPT_ID),
+        ]);
+
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(Some("com.apple.mail")),
+            Some(SMART_FORMAT_PROMPT_ID.to_string())
+        );
+        let settings = settings_with_rules(vec![rule("com.apple.mail", "deleted_prompt")]);
+        assert_eq!(
+            settings.post_process_prompt_id_for_app(Some("com.apple.mail")),
+            Some("default_improve_transcriptions".to_string())
+        );
+    }
+
+    #[test]
+    fn upsert_app_rule_adds_replaces_and_renames_in_place() {
+        let mut rules = vec![rule("a.app", "p1"), rule("b.app", "p1")];
+
+        upsert_app_rule(&mut rules, None, rule("c.app", "p2"));
+        assert_eq!(
+            rules,
+            vec![
+                rule("a.app", "p1"),
+                rule("b.app", "p1"),
+                rule("c.app", "p2")
+            ]
+        );
+
+        // Same app (any case) replaces the existing rule in place.
+        upsert_app_rule(&mut rules, None, rule("B.APP", "p2"));
+        assert_eq!(
+            rules,
+            vec![
+                rule("a.app", "p1"),
+                rule("B.APP", "p2"),
+                rule("c.app", "p2")
+            ]
+        );
+
+        // Editing a rule's app id keeps its position.
+        upsert_app_rule(&mut rules, Some("a.app"), rule("d.app", "p1"));
+        assert_eq!(
+            rules,
+            vec![
+                rule("d.app", "p1"),
+                rule("B.APP", "p2"),
+                rule("c.app", "p2")
+            ]
+        );
+
+        // Renaming onto another rule's app id leaves a single rule.
+        upsert_app_rule(&mut rules, Some("c.app"), rule("d.app", "p3"));
+        assert_eq!(rules, vec![rule("d.app", "p3"), rule("B.APP", "p2")]);
+    }
+
+    #[test]
+    fn app_rules_default_to_empty_for_existing_stores() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(settings.post_process_app_rules.is_empty());
     }
 
     #[test]

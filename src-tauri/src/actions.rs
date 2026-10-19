@@ -150,7 +150,11 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
-async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
+async fn post_process_transcription(
+    settings: &AppSettings,
+    transcription: &str,
+    prompt_id: Option<&str>,
+) -> Option<String> {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
         return None;
@@ -178,8 +182,8 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         return None;
     }
 
-    let selected_prompt_id = match &settings.post_process_selected_prompt_id {
-        Some(id) => id.clone(),
+    let selected_prompt_id = match prompt_id {
+        Some(id) => id,
         None => {
             debug!("Post-processing skipped because no prompt is selected");
             return None;
@@ -379,6 +383,22 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 }
 
+/// Picks the prompt for this recording: the app rule matching the app that was
+/// frontmost when recording started, otherwise the selected prompt.
+fn resolve_post_process_prompt_id(settings: &AppSettings, app_id: Option<&str>) -> Option<String> {
+    match settings.matching_app_rule(app_id) {
+        Some(rule) => debug!(
+            "Applying app rule for '{}' -> prompt '{}'",
+            rule.app_id, rule.prompt_id
+        ),
+        None => debug!(
+            "No app rule for {:?}; using the selected prompt",
+            app_id.unwrap_or("<no app detected>")
+        ),
+    }
+    settings.post_process_prompt_id_for_app(app_id)
+}
+
 pub(crate) struct ProcessedTranscription {
     pub final_text: String,
     pub post_processed_text: Option<String>,
@@ -389,6 +409,7 @@ pub(crate) async fn process_transcription_output(
     app: &AppHandle,
     transcription: &str,
     post_process: bool,
+    app_id: Option<&str>,
 ) -> ProcessedTranscription {
     let settings = get_settings(app);
     let mut final_text = transcription.to_string();
@@ -396,11 +417,14 @@ pub(crate) async fn process_transcription_output(
     let mut post_process_prompt: Option<String> = None;
 
     if post_process {
-        if let Some(processed_text) = post_process_transcription(&settings, &final_text).await {
+        let prompt_id = resolve_post_process_prompt_id(&settings, app_id);
+        if let Some(processed_text) =
+            post_process_transcription(&settings, &final_text, prompt_id.as_deref()).await
+        {
             post_processed_text = Some(processed_text.clone());
             final_text = processed_text;
 
-            if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
+            if let Some(prompt_id) = &prompt_id {
                 if let Some(prompt) = settings
                     .post_process_prompts
                     .iter()
@@ -423,6 +447,10 @@ impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
+
+        // Capture the target app before our overlay or any focus change, so
+        // post-processing can apply that app's prompt rule.
+        crate::frontmost_app::detect_and_remember();
 
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
@@ -636,6 +664,7 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let frontmost_app_id = crate::frontmost_app::last_detected().map(|app| app.id);
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -733,7 +762,12 @@ impl ShortcutAction for TranscribeAction {
                                 }
                             }
                             let Some(processed) = complete_unless_cancelled(
-                                process_transcription_output(&ah, &transcription, post_process),
+                                process_transcription_output(
+                                    &ah,
+                                    &transcription,
+                                    post_process,
+                                    frontmost_app_id.as_deref(),
+                                ),
                                 || rm.was_cancelled_since(cancel_generation),
                             )
                             .await

@@ -442,6 +442,32 @@
         "cancel": "キャンセル",
         "selectToEdit": "上からプロンプトを選択して、詳細を表示・編集します。",
         "createFirst": "上の「新しいプロンプトを作成」をクリックして、最初の後処理プロンプトを作成してください。"
+      },
+      "appRules": {
+        "title": "App Rules",
+        "lastDetected": {
+          "title": "Last Detected App",
+          "description": "The app that was in front when you last started a recording. Record once in an app, then use it here to create a rule.",
+          "none": "No app detected yet",
+          "use": "Use this app",
+          "refresh": "Refresh last detected app"
+        },
+        "rules": {
+          "title": "Rules",
+          "description": "Use a different prompt depending on the app you dictate into. When no rule matches, the selected prompt is used.",
+          "empty": "No app rules yet. Add one below.",
+          "missingPrompt": "Missing prompt",
+          "edit": "Edit",
+          "delete": "Delete"
+        },
+        "form": {
+          "addTitle": "Add Rule",
+          "editTitle": "Edit Rule",
+          "appIdPlaceholder": "App identifier (e.g. com.tinyspeck.slackmacgap or slack.exe)",
+          "appNamePlaceholder": "Display name (optional)",
+          "add": "Add Rule",
+          "save": "Save Rule"
+        }
       }
     },
     "history": {

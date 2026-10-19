@@ -442,6 +442,32 @@
         "cancel": "रद्द गर्नुहोस्",
         "selectToEdit": "विवरण हेर्न र सम्पादन गर्न माथिबाट प्रम्प्ट चयन गर्नुहोस्।",
         "createFirst": "आफ्नो पहिलो पोस्ट-प्रोसेसिङ प्रम्प्ट बनाउन माथिको 'नयाँ प्रम्प्ट बनाउनुहोस्' क्लिक गर्नुहोस्।"
+      },
+      "appRules": {
+        "title": "App Rules",
+        "lastDetected": {
+          "title": "Last Detected App",
+          "description": "The app that was in front when you last started a recording. Record once in an app, then use it here to create a rule.",
+          "none": "No app detected yet",
+          "use": "Use this app",
+          "refresh": "Refresh last detected app"
+        },
+        "rules": {
+          "title": "Rules",
+          "description": "Use a different prompt depending on the app you dictate into. When no rule matches, the selected prompt is used.",
+          "empty": "No app rules yet. Add one below.",
+          "missingPrompt": "Missing prompt",
+          "edit": "Edit",
+          "delete": "Delete"
+        },
+        "form": {
+          "addTitle": "Add Rule",
+          "editTitle": "Edit Rule",
+          "appIdPlaceholder": "App identifier (e.g. com.tinyspeck.slackmacgap or slack.exe)",
+          "appNamePlaceholder": "Display name (optional)",
+          "add": "Add Rule",
+          "save": "Save Rule"
+        }
       }
     },
     "history": {
