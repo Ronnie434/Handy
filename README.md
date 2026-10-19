@@ -65,12 +65,10 @@ This fork adds Wispr Flow-style features on top of Handy's LLM post-processing. 
    Then quit and reopen Ollama.
 
 3. In Handy:
-   - **Settings** → turn on **Post-processing**.
-   - **Post Process → Provider**: **Custom**, Base URL `http://localhost:11434/v1`, no API key.
-   - **Model**: click refresh and pick `gemma4:e4b`.
-   - **Prompt**: select **Smart Format (Wispr-style)**.
-   - **Hotkey**: set **Post-Processing Hotkey** to a single key such as **Left Option** (hold to talk). Make sure no other shortcut uses the same key: one key press would trigger every binding on it.
-   - **Advanced → Custom Words**: add names and terms you use often.
+   - **Fresh installs need nothing else.** They start with post-processing on, provider **Custom** (Ollama at `http://localhost:11434/v1`), model `gemma4:e4b` and the **Smart Format (Wispr-style)** prompt selected. Hold **Option+Shift+Space** to dictate with cleanup, or select text first to give a command.
+   - **Existing installs** (settings from an earlier Handy) keep their own choices. Set them once: **Settings** → turn on **Post-processing**; **Post Process → Provider** **Custom** with Base URL `http://localhost:11434/v1` and no API key; **Model** → refresh and pick `gemma4:e4b`; **Prompt** → **Smart Format (Wispr-style)**.
+   - Optional: set **Post-Processing Hotkey** to a single key such as **Left Option** (hold to talk). Make sure no other shortcut uses the same key: one key press would trigger every binding on it.
+   - Optional: **Advanced → Custom Words** for names and terms you use often.
 
 Ollama must be running for cleanup and command mode. Without it, Handy still pastes the raw transcription and command mode leaves your text unchanged.
 

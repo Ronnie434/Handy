@@ -817,6 +817,21 @@ fn default_model_for_provider(provider_id: &str) -> String {
     String::new()
 }
 
+/// Provider and model a fresh install uses: the custom provider defaults to a
+/// local Ollama server, and this model handled every Smart Format and command
+/// mode case in testing while answering in under a second.
+const FRESH_INSTALL_PROVIDER_ID: &str = "custom";
+const FRESH_INSTALL_MODEL: &str = "gemma4:e4b";
+
+fn fresh_install_post_process_models() -> HashMap<String, String> {
+    let mut models = default_post_process_models();
+    models.insert(
+        FRESH_INSTALL_PROVIDER_ID.to_string(),
+        FRESH_INSTALL_MODEL.to_string(),
+    );
+    models
+}
+
 fn default_post_process_models() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for provider in default_post_process_providers() {
@@ -1076,13 +1091,16 @@ pub fn get_default_settings() -> AppSettings {
         clipboard_handling: ClipboardHandling::default(),
         auto_submit: default_auto_submit(),
         auto_submit_key: AutoSubmitKey::default(),
-        post_process_enabled: default_post_process_enabled(),
-        post_process_provider_id: default_post_process_provider_id(),
+        // Fresh installs start ready for local Smart Format cleanup through
+        // Ollama; the only setup left is `ollama pull` of the default model.
+        // Stores that already exist keep their own values.
+        post_process_enabled: true,
+        post_process_provider_id: FRESH_INSTALL_PROVIDER_ID.to_string(),
         post_process_providers: default_post_process_providers(),
         post_process_api_keys: default_post_process_api_keys(),
-        post_process_models: default_post_process_models(),
+        post_process_models: fresh_install_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
-        post_process_selected_prompt_id: None,
+        post_process_selected_prompt_id: Some(SMART_FORMAT_PROMPT_ID.to_string()),
         post_process_app_rules: Vec::new(),
         post_process_selection_commands: true,
         command_mode_prompt: default_command_mode_prompt(),
@@ -1989,6 +2007,39 @@ mod tests {
             .post_process_prompts
             .iter()
             .any(|p| p.id == SMART_FORMAT_PROMPT_ID));
+    }
+
+    #[test]
+    fn fresh_install_is_ready_for_local_smart_format() {
+        let settings = get_default_settings();
+        assert!(settings.post_process_enabled);
+        assert_eq!(settings.post_process_provider_id, "custom");
+        assert_eq!(
+            settings
+                .post_process_models
+                .get("custom")
+                .map(String::as_str),
+            Some("gemma4:e4b")
+        );
+        assert_eq!(
+            settings.post_process_selected_prompt_id.as_deref(),
+            Some(SMART_FORMAT_PROMPT_ID)
+        );
+        let custom = settings.post_process_provider("custom").unwrap();
+        assert_eq!(custom.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn existing_stores_keep_their_post_process_choices() {
+        let raw = serde_json::json!({
+            "post_process_enabled": false,
+            "post_process_provider_id": "openai",
+            "post_process_selected_prompt_id": null
+        });
+        let settings: AppSettings = serde_json::from_value(raw).unwrap();
+        assert!(!settings.post_process_enabled);
+        assert_eq!(settings.post_process_provider_id, "openai");
+        assert_eq!(settings.post_process_selected_prompt_id, None);
     }
 
     #[test]
