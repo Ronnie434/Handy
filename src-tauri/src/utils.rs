@@ -161,12 +161,17 @@ pub fn is_gnome_wayland() -> bool {
 /// Returns false when the variable is not set.
 pub fn env_flag_enabled(name: &str) -> bool {
     match std::env::var(name) {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
-        ),
+        Ok(v) => flag_value_enabled(&v),
         Err(_) => false,
     }
+}
+
+/// Whether a flag value reads as "on" (anything except empty/0/false/no/off).
+pub fn flag_value_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 #[cfg(test)]

@@ -1386,11 +1386,16 @@ fn apply_settings_migrations(
 
 /// Update checks are forced off (without touching the persisted setting) when
 /// `HANDY_DISABLE_UPDATER` is set — e.g. by the Nix package, since self-update
-/// can't work against an immutable /nix/store install.
+/// can't work against an immutable /nix/store install. The flag is also read at
+/// compile time, so a custom build (whose features upstream releases lack) can
+/// bake it in instead of relying on the launch environment.
 pub fn update_checks_forced_disabled() -> bool {
     use std::sync::OnceLock;
     static IS_UPDATER_DISABLED: OnceLock<bool> = OnceLock::new();
-    *IS_UPDATER_DISABLED.get_or_init(|| utils::env_flag_enabled("HANDY_DISABLE_UPDATER"))
+    *IS_UPDATER_DISABLED.get_or_init(|| {
+        utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
+            || option_env!("HANDY_DISABLE_UPDATER").is_some_and(utils::flag_value_enabled)
+    })
 }
 
 /// Effective updater state: the user's stored preference, overridden to `false`
