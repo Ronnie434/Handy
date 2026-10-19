@@ -81,9 +81,40 @@ fn strip_think_block(s: &str) -> &str {
 }
 
 /// Build a system prompt from the user's prompt template.
-/// Removes `${output}` placeholder since the transcription is sent as the user message.
-fn build_system_prompt(prompt_template: &str) -> String {
-    prompt_template.replace("${output}", "").trim().to_string()
+/// Removes `${output}` placeholder since the transcription is sent as the user message,
+/// and appends the custom-words glossary when there is one.
+fn build_system_prompt(prompt_template: &str, custom_words: &[String]) -> String {
+    let prompt = prompt_template.replace("${output}", "").trim().to_string();
+    append_custom_words_glossary(prompt, custom_words)
+}
+
+/// Glossary telling the LLM how the user's custom words are spelled, or `None`
+/// when there are no non-blank custom words. One term per line so terms that
+/// contain commas or quotes stay unambiguous.
+fn custom_words_glossary(custom_words: &[String]) -> Option<String> {
+    let terms: Vec<&str> = custom_words
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut glossary =
+        String::from("These terms may appear in the transcript; use this exact spelling:");
+    for term in terms {
+        glossary.push_str("\n- ");
+        glossary.push_str(term);
+    }
+    Some(glossary)
+}
+
+fn append_custom_words_glossary(prompt: String, custom_words: &[String]) -> String {
+    match custom_words_glossary(custom_words) {
+        Some(glossary) => format!("{prompt}\n\n{glossary}"),
+        None => prompt,
+    }
 }
 
 /// Returns `true` when a transcription has no meaningful content to
@@ -194,7 +225,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
 
-        let system_prompt = build_system_prompt(&prompt);
+        let system_prompt = build_system_prompt(&prompt, &settings.custom_words);
         let user_content = transcription.to_string();
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
@@ -309,7 +340,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 
     // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    let processed_prompt = append_custom_words_glossary(
+        prompt.replace("${output}", transcription),
+        &settings.custom_words,
+    );
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
     match crate::llm_client::send_chat_completion(
@@ -876,7 +910,8 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
+        append_custom_words_glossary, build_system_prompt, complete_unless_cancelled,
+        custom_words_glossary, is_blank_transcription, should_use_streaming_overlay,
         strip_think_block,
     };
     use crate::settings::OverlayStyle;
@@ -897,6 +932,72 @@ mod tests {
     fn non_blank_transcription_is_kept() {
         assert!(!is_blank_transcription("hello"));
         assert!(!is_blank_transcription("  hello  "));
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn system_prompt_without_custom_words_has_no_glossary() {
+        let prompt = build_system_prompt("<transcript>\n${output}\n</transcript>\nClean it.", &[]);
+        assert_eq!(prompt, "<transcript>\n\n</transcript>\nClean it.");
+        assert!(!prompt.contains("exact spelling"));
+    }
+
+    #[test]
+    fn system_prompt_appends_glossary_after_template() {
+        let prompt = build_system_prompt("${output}\nClean it.", &words(&["Handy", "cjpais"]));
+        assert_eq!(
+            prompt,
+            "Clean it.\n\nThese terms may appear in the transcript; use this exact spelling:\n- Handy\n- cjpais"
+        );
+    }
+
+    #[test]
+    fn blank_custom_words_are_skipped() {
+        assert_eq!(custom_words_glossary(&[]), None);
+        assert_eq!(custom_words_glossary(&words(&["", "  ", "\t"])), None);
+        assert_eq!(
+            custom_words_glossary(&words(&["  Kubernetes ", ""])).as_deref(),
+            Some(
+                "These terms may appear in the transcript; use this exact spelling:\n- Kubernetes"
+            )
+        );
+        assert_eq!(
+            build_system_prompt("Clean it.", &words(&[" "])),
+            "Clean it."
+        );
+    }
+
+    #[test]
+    fn glossary_keeps_special_characters_verbatim() {
+        let glossary = custom_words_glossary(&words(&[
+            "C++",
+            "Smith, Jones & Co.",
+            "\"quoted\"",
+            "${output}",
+            "Zürich",
+            "東京",
+        ]))
+        .unwrap();
+        assert!(glossary.ends_with(
+            "\n- C++\n- Smith, Jones & Co.\n- \"quoted\"\n- ${output}\n- Zürich\n- 東京"
+        ));
+    }
+
+    #[test]
+    fn legacy_prompt_gets_glossary_after_transcript() {
+        let prompt =
+            append_custom_words_glossary("Transcript: hello handy".to_string(), &words(&["Handy"]));
+        assert_eq!(
+            prompt,
+            "Transcript: hello handy\n\nThese terms may appear in the transcript; use this exact spelling:\n- Handy"
+        );
+        assert_eq!(
+            append_custom_words_glossary("Transcript: hi".to_string(), &[]),
+            "Transcript: hi"
+        );
     }
 
     #[test]
