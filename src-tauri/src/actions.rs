@@ -8,7 +8,9 @@ use crate::managers::model::ModelManager;
 use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, OverlayStyle, PostProcessProvider, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -57,6 +59,218 @@ pub trait ShortcutAction: Send + Sync {
 // Transcribe Action
 struct TranscribeAction {
     post_process: bool,
+    /// Command mode: the recording is an instruction applied to the selected
+    /// text, and the result replaces the selection.
+    command_mode: bool,
+}
+
+/// Why command mode could not run; each maps to an overlay notice and a
+/// main-window toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandModeIssue {
+    NoSelection,
+    SecureInput,
+    NoProvider,
+    Failed,
+}
+
+impl CommandModeIssue {
+    /// Overlay state (and `command-mode-error` event payload) for this issue.
+    fn notice(self) -> &'static str {
+        match self {
+            CommandModeIssue::NoSelection => "command-no-selection",
+            CommandModeIssue::SecureInput => "command-secure-input",
+            CommandModeIssue::NoProvider => "command-no-provider",
+            CommandModeIssue::Failed => "command-failed",
+        }
+    }
+}
+
+fn report_command_mode_issue(app: &AppHandle, issue: CommandModeIssue) {
+    debug!("Command mode stopped: {:?}", issue);
+    utils::show_notice_overlay(app, issue.notice());
+    let _ = app.emit("command-mode-error", issue.notice());
+}
+
+/// Checks command mode can run before recording starts. Returns false (after
+/// telling the user why) so no recording starts.
+fn command_mode_available(app: &AppHandle) -> bool {
+    // Secure input (password fields, Secure Keyboard Entry) blocks the
+    // synthetic copy and paste keystrokes, so don't touch that field at all.
+    if crate::secure_input::is_enabled_now() {
+        report_command_mode_issue(app, CommandModeIssue::SecureInput);
+        return false;
+    }
+
+    if configured_llm(&get_settings(app)).is_none() {
+        report_command_mode_issue(app, CommandModeIssue::NoProvider);
+        return false;
+    }
+
+    true
+}
+
+/// Reads the selection command mode will edit: through Accessibility when the
+/// app exposes it, otherwise by copying it. This runs once recording stops,
+/// not when the shortcut is pressed: while the shortcut is held, the
+/// synthetic Cmd/Ctrl+C would reach Handy's own shortcut listener and read as
+/// the shortcut being released.
+async fn capture_command_selection(app: &AppHandle) -> Result<String, CommandModeIssue> {
+    let handle = app.clone();
+    let captured =
+        tauri::async_runtime::spawn_blocking(move || match crate::selection::focused_selection() {
+            crate::selection::Selection::Text(text) => Ok(Some(text)),
+            crate::selection::Selection::Empty => Ok(None),
+            crate::selection::Selection::Unknown => crate::clipboard::capture_selection(&handle),
+        })
+        .await;
+    match captured {
+        Ok(Ok(Some(text))) => {
+            debug!("Command mode captured {} chars of selection", text.len());
+            Ok(text)
+        }
+        Ok(Ok(None)) => Err(CommandModeIssue::NoSelection),
+        Ok(Err(e)) => {
+            error!("Command mode could not copy the selection: {}", e);
+            Err(CommandModeIssue::Failed)
+        }
+        Err(e) => {
+            error!("Command mode selection task failed: {}", e);
+            Err(CommandModeIssue::Failed)
+        }
+    }
+}
+
+/// Whether the post-processing hotkey should check for selected text and run
+/// command mode on it.
+fn selection_commands_apply(settings: &AppSettings) -> bool {
+    settings.post_process_selection_commands
+        && !crate::secure_input::is_enabled_now()
+        && configured_llm(settings).is_some()
+}
+
+/// User message for command mode: the selection and the spoken instruction.
+fn build_command_mode_user_content(selection: &str, instruction: &str) -> String {
+    format!("<text>\n{selection}\n</text>\n\n<instruction>\n{instruction}\n</instruction>")
+}
+
+/// Sends the selection and instruction to the active post-processing provider
+/// and returns the rewritten text, or `None` when the request fails.
+async fn run_command_mode(
+    settings: &AppSettings,
+    selection: &str,
+    instruction: &str,
+) -> Option<String> {
+    if is_blank_transcription(instruction) {
+        debug!("Command mode skipped because the instruction is empty");
+        return None;
+    }
+    let (provider, model) = configured_llm(settings)?;
+    let system_prompt = build_system_prompt(&settings.command_mode_prompt, &settings.custom_words);
+    let user_content = build_command_mode_user_content(selection, instruction);
+
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if !apple_intelligence::check_apple_intelligence_availability() {
+                debug!("Apple Intelligence selected but not currently available on this device");
+                return None;
+            }
+            let token_limit = model.trim().parse::<i32>().unwrap_or(0);
+            return match apple_intelligence::process_text_with_system_prompt(
+                &system_prompt,
+                &user_content,
+                token_limit,
+            ) {
+                Ok(result) if !result.trim().is_empty() => Some(strip_invisible_chars(&result)),
+                Ok(_) => {
+                    debug!("Apple Intelligence returned an empty command mode response");
+                    None
+                }
+                Err(err) => {
+                    error!("Apple Intelligence command mode failed: {}", err);
+                    None
+                }
+            };
+        }
+
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            debug!("Apple Intelligence provider selected on unsupported platform");
+            return None;
+        }
+    }
+
+    let api_key = settings
+        .post_process_api_keys
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+
+    match crate::llm_client::send_chat_completion_with_schema(
+        &provider,
+        api_key,
+        &model,
+        user_content,
+        Some(system_prompt),
+        None,
+        disable_reasoning,
+    )
+    .await
+    {
+        Ok(Some(content)) => {
+            let content = strip_invisible_chars(strip_think_block(&content));
+            if content.trim().is_empty() {
+                debug!("Command mode response was empty");
+                None
+            } else {
+                debug!(
+                    "Command mode succeeded for provider '{}'. Output length: {} chars",
+                    provider.id,
+                    content.len()
+                );
+                Some(content)
+            }
+        }
+        Ok(None) => {
+            error!("Command mode LLM response has no content");
+            None
+        }
+        Err(e) => {
+            error!("Command mode failed for provider '{}': {}", provider.id, e);
+            None
+        }
+    }
+}
+
+/// Output for a command mode recording. On failure the user is told why and
+/// `final_text` is empty, so nothing is pasted over their selection.
+async fn process_command_output(
+    app: &AppHandle,
+    instruction: &str,
+    selection: Result<String, CommandModeIssue>,
+) -> ProcessedTranscription {
+    let settings = get_settings(app);
+    let result = match selection {
+        Ok(selection) => run_command_mode(&settings, &selection, instruction).await,
+        Err(issue) => {
+            report_command_mode_issue(app, issue);
+            return ProcessedTranscription {
+                final_text: String::new(),
+                post_processed_text: None,
+                post_process_prompt: None,
+            };
+        }
+    };
+    if result.is_none() {
+        report_command_mode_issue(app, CommandModeIssue::Failed);
+    }
+    ProcessedTranscription {
+        final_text: result.clone().unwrap_or_default(),
+        post_processed_text: result,
+        post_process_prompt: Some(settings.command_mode_prompt),
+    }
 }
 
 /// Field name for structured output JSON schema
@@ -81,9 +295,70 @@ fn strip_think_block(s: &str) -> &str {
 }
 
 /// Build a system prompt from the user's prompt template.
-/// Removes `${output}` placeholder since the transcription is sent as the user message.
-fn build_system_prompt(prompt_template: &str) -> String {
-    prompt_template.replace("${output}", "").trim().to_string()
+/// Removes `${output}` placeholder since the transcription is sent as the user message,
+/// and appends the custom-words glossary when there is one.
+fn build_system_prompt(prompt_template: &str, custom_words: &[String]) -> String {
+    let prompt = prompt_template.replace("${output}", "").trim().to_string();
+    append_custom_words_glossary(prompt, custom_words)
+}
+
+/// Glossary telling the LLM how the user's custom words are spelled, or `None`
+/// when there are no non-blank custom words. One term per line so terms that
+/// contain commas or quotes stay unambiguous.
+fn custom_words_glossary(custom_words: &[String]) -> Option<String> {
+    let terms: Vec<&str> = custom_words
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut glossary =
+        String::from("These terms may appear in the transcript; use this exact spelling:");
+    for term in terms {
+        glossary.push_str("\n- ");
+        glossary.push_str(term);
+    }
+    Some(glossary)
+}
+
+fn append_custom_words_glossary(prompt: String, custom_words: &[String]) -> String {
+    match custom_words_glossary(custom_words) {
+        Some(glossary) => format!("{prompt}\n\n{glossary}"),
+        None => prompt,
+    }
+}
+
+/// "New line" / "new paragraph" said as its own clause: after sentence
+/// punctuation (or at the start) and before punctuation or the end.
+static SPOKEN_BREAK_AFTER_PUNCTUATION: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?P<pre>^|[.!?,;:])\s*(?i:new\s*(?P<kind>line|paragraph))\s*(?:[.!?,;:]+|$)\s*",
+    )
+    .expect("valid spoken line break pattern")
+});
+
+/// The same command mid-sentence, which speech models capitalize ("Hi Sarah
+/// New line. Thanks"). Requiring the capital and trailing punctuation keeps
+/// ordinary phrases like "a new line of products" intact.
+static SPOKEN_BREAK_CAPITALIZED: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"\s+New\s*(?P<kind>(?i:line|paragraph))\s*(?:[.!?,;:]+|$)\s*")
+        .expect("valid spoken line break pattern")
+});
+
+/// Replaces spoken "new line" / "new paragraph" commands with real line breaks.
+fn apply_spoken_line_breaks(text: &str) -> String {
+    let replace = |caps: &regex::Captures| {
+        let pre = caps.name("pre").map_or("", |m| m.as_str());
+        let kind = caps["kind"].to_ascii_lowercase();
+        let brk = if kind == "paragraph" { "\n\n" } else { "\n" };
+        format!("{pre}{brk}")
+    };
+    let text = SPOKEN_BREAK_AFTER_PUNCTUATION.replace_all(text, replace);
+    let text = SPOKEN_BREAK_CAPITALIZED.replace_all(&text, replace);
+    text.trim().to_string()
 }
 
 /// Returns `true` when a transcription has no meaningful content to
@@ -119,12 +394,9 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
-async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
-    if is_blank_transcription(transcription) {
-        debug!("Post-processing skipped because the transcription is empty");
-        return None;
-    }
-
+/// The active post-processing provider and its model, or `None` (logged) when
+/// either is missing.
+fn configured_llm(settings: &AppSettings) -> Option<(PostProcessProvider, String)> {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
@@ -147,8 +419,23 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         return None;
     }
 
-    let selected_prompt_id = match &settings.post_process_selected_prompt_id {
-        Some(id) => id.clone(),
+    Some((provider, model))
+}
+
+async fn post_process_transcription(
+    settings: &AppSettings,
+    transcription: &str,
+    prompt_id: Option<&str>,
+) -> Option<String> {
+    if is_blank_transcription(transcription) {
+        debug!("Post-processing skipped because the transcription is empty");
+        return None;
+    }
+
+    let (provider, model) = configured_llm(settings)?;
+
+    let selected_prompt_id = match prompt_id {
+        Some(id) => id,
         None => {
             debug!("Post-processing skipped because no prompt is selected");
             return None;
@@ -194,7 +481,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
 
-        let system_prompt = build_system_prompt(&prompt);
+        let system_prompt = build_system_prompt(&prompt, &settings.custom_words);
         let user_content = transcription.to_string();
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
@@ -309,7 +596,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 
     // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    let processed_prompt = append_custom_words_glossary(
+        prompt.replace("${output}", transcription),
+        &settings.custom_words,
+    );
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
     match crate::llm_client::send_chat_completion(
@@ -345,6 +635,22 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 }
 
+/// Picks the prompt for this recording: the app rule matching the app that was
+/// frontmost when recording started, otherwise the selected prompt.
+fn resolve_post_process_prompt_id(settings: &AppSettings, app_id: Option<&str>) -> Option<String> {
+    match settings.matching_app_rule(app_id) {
+        Some(rule) => debug!(
+            "Applying app rule for '{}' -> prompt '{}'",
+            rule.app_id, rule.prompt_id
+        ),
+        None => debug!(
+            "No app rule for {:?}; using the selected prompt",
+            app_id.unwrap_or("<no app detected>")
+        ),
+    }
+    settings.post_process_prompt_id_for_app(app_id)
+}
+
 pub(crate) struct ProcessedTranscription {
     pub final_text: String,
     pub post_processed_text: Option<String>,
@@ -355,18 +661,28 @@ pub(crate) async fn process_transcription_output(
     app: &AppHandle,
     transcription: &str,
     post_process: bool,
+    app_id: Option<&str>,
 ) -> ProcessedTranscription {
     let settings = get_settings(app);
-    let mut final_text = transcription.to_string();
+    // Turn spoken "new line" commands into real breaks before the LLM sees
+    // the text; models tend to keep the words instead.
+    let mut final_text = if post_process {
+        apply_spoken_line_breaks(transcription)
+    } else {
+        transcription.to_string()
+    };
     let mut post_processed_text: Option<String> = None;
     let mut post_process_prompt: Option<String> = None;
 
     if post_process {
-        if let Some(processed_text) = post_process_transcription(&settings, &final_text).await {
+        let prompt_id = resolve_post_process_prompt_id(&settings, app_id);
+        if let Some(processed_text) =
+            post_process_transcription(&settings, &final_text, prompt_id.as_deref()).await
+        {
             post_processed_text = Some(processed_text.clone());
             final_text = processed_text;
 
-            if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
+            if let Some(prompt_id) = &prompt_id {
                 if let Some(prompt) = settings
                     .post_process_prompts
                     .iter()
@@ -389,6 +705,14 @@ impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
+
+        // Capture the target app before our overlay or any focus change, so
+        // post-processing can apply that app's prompt rule.
+        crate::frontmost_app::detect_and_remember();
+
+        if self.command_mode && !command_mode_available(app) {
+            return;
+        }
 
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
@@ -602,6 +926,8 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let command_mode = self.command_mode;
+        let frontmost_app_id = crate::frontmost_app::last_detected().map(|app| app.id);
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -610,6 +936,22 @@ impl ShortcutAction for TranscribeAction {
                 "Starting async transcription task for binding: {}",
                 binding_id
             );
+
+            // Read the selection first, while it is still selected and before
+            // transcription latency gives the user time to move on. With
+            // selection commands on, the post-processing hotkey edits selected
+            // text instead of dictating over it.
+            let command_selection = if command_mode {
+                Some(capture_command_selection(&ah).await)
+            } else if post_process && selection_commands_apply(&get_settings(&ah)) {
+                capture_command_selection(&ah).await.ok().map(|selection| {
+                    debug!("Text is selected; post-processing hotkey runs command mode");
+                    Ok(selection)
+                })
+            } else {
+                None
+            };
+            let command_mode = command_selection.is_some();
 
             let stop_recording_time = Instant::now();
             if let Some(samples) = rm.stop_recording(&binding_id, cancel_generation) {
@@ -698,10 +1040,25 @@ impl ShortcutAction for TranscribeAction {
                                     show_processing_overlay(&ah);
                                 }
                             }
-                            let Some(processed) = complete_unless_cancelled(
-                                process_transcription_output(&ah, &transcription, post_process),
-                                || rm.was_cancelled_since(cancel_generation),
-                            )
+                            let output = async {
+                                match command_selection {
+                                    Some(selection) => {
+                                        process_command_output(&ah, &transcription, selection).await
+                                    }
+                                    None => {
+                                        process_transcription_output(
+                                            &ah,
+                                            &transcription,
+                                            post_process,
+                                            frontmost_app_id.as_deref(),
+                                        )
+                                        .await
+                                    }
+                                }
+                            };
+                            let Some(processed) = complete_unless_cancelled(output, || {
+                                rm.was_cancelled_since(cancel_generation)
+                            })
                             .await
                             else {
                                 debug!("Transcription operation cancelled during output handling");
@@ -731,7 +1088,10 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             if processed.final_text.is_empty() {
-                                utils::hide_recording_overlay(&ah);
+                                // Command mode already showed a notice that hides itself.
+                                if !command_mode {
+                                    utils::hide_recording_overlay(&ah);
+                                }
                                 set_tray_state(&ah, TrayIconState::Idle);
                             } else {
                                 let ah_clone = ah.clone();
@@ -746,7 +1106,12 @@ impl ShortcutAction for TranscribeAction {
                                         return;
                                     }
 
-                                    match utils::paste(final_text, ah_clone.clone()) {
+                                    let pasted = if command_mode {
+                                        utils::paste_replacement(final_text, ah_clone.clone())
+                                    } else {
+                                        utils::paste(final_text, ah_clone.clone())
+                                    };
+                                    match pasted {
                                         Ok(()) => debug!(
                                             "Text pasted successfully in {:?}",
                                             paste_time.elapsed()
@@ -856,11 +1221,22 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
         "transcribe".to_string(),
         Arc::new(TranscribeAction {
             post_process: false,
+            command_mode: false,
         }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "transcribe_with_post_process".to_string(),
-        Arc::new(TranscribeAction { post_process: true }) as Arc<dyn ShortcutAction>,
+        Arc::new(TranscribeAction {
+            post_process: true,
+            command_mode: false,
+        }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "command_mode".to_string(),
+        Arc::new(TranscribeAction {
+            post_process: true,
+            command_mode: true,
+        }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),
@@ -876,8 +1252,9 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
-        strip_think_block,
+        append_custom_words_glossary, apply_spoken_line_breaks, build_command_mode_user_content,
+        build_system_prompt, complete_unless_cancelled, custom_words_glossary,
+        is_blank_transcription, should_use_streaming_overlay, strip_think_block, CommandModeIssue,
     };
     use crate::settings::OverlayStyle;
     use std::future;
@@ -897,6 +1274,139 @@ mod tests {
     fn non_blank_transcription_is_kept() {
         assert!(!is_blank_transcription("hello"));
         assert!(!is_blank_transcription("  hello  "));
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn system_prompt_without_custom_words_has_no_glossary() {
+        let prompt = build_system_prompt("<transcript>\n${output}\n</transcript>\nClean it.", &[]);
+        assert_eq!(prompt, "<transcript>\n\n</transcript>\nClean it.");
+        assert!(!prompt.contains("exact spelling"));
+    }
+
+    #[test]
+    fn system_prompt_appends_glossary_after_template() {
+        let prompt = build_system_prompt("${output}\nClean it.", &words(&["Handy", "cjpais"]));
+        assert_eq!(
+            prompt,
+            "Clean it.\n\nThese terms may appear in the transcript; use this exact spelling:\n- Handy\n- cjpais"
+        );
+    }
+
+    #[test]
+    fn blank_custom_words_are_skipped() {
+        assert_eq!(custom_words_glossary(&[]), None);
+        assert_eq!(custom_words_glossary(&words(&["", "  ", "\t"])), None);
+        assert_eq!(
+            custom_words_glossary(&words(&["  Kubernetes ", ""])).as_deref(),
+            Some(
+                "These terms may appear in the transcript; use this exact spelling:\n- Kubernetes"
+            )
+        );
+        assert_eq!(
+            build_system_prompt("Clean it.", &words(&[" "])),
+            "Clean it."
+        );
+    }
+
+    #[test]
+    fn glossary_keeps_special_characters_verbatim() {
+        let glossary = custom_words_glossary(&words(&[
+            "C++",
+            "Smith, Jones & Co.",
+            "\"quoted\"",
+            "${output}",
+            "Zürich",
+            "東京",
+        ]))
+        .unwrap();
+        assert!(glossary.ends_with(
+            "\n- C++\n- Smith, Jones & Co.\n- \"quoted\"\n- ${output}\n- Zürich\n- 東京"
+        ));
+    }
+
+    #[test]
+    fn legacy_prompt_gets_glossary_after_transcript() {
+        let prompt =
+            append_custom_words_glossary("Transcript: hello handy".to_string(), &words(&["Handy"]));
+        assert_eq!(
+            prompt,
+            "Transcript: hello handy\n\nThese terms may appear in the transcript; use this exact spelling:\n- Handy"
+        );
+        assert_eq!(
+            append_custom_words_glossary("Transcript: hi".to_string(), &[]),
+            "Transcript: hi"
+        );
+    }
+
+    #[test]
+    fn spoken_new_line_commands_become_breaks() {
+        assert_eq!(
+            apply_spoken_line_breaks(
+                "Hi Sarah. New line. Thanks for the update. New line. See you tomorrow"
+            ),
+            "Hi Sarah.\nThanks for the update.\nSee you tomorrow"
+        );
+        assert_eq!(
+            apply_spoken_line_breaks("Hi Sara New line. Thanks for update"),
+            "Hi Sara\nThanks for update"
+        );
+        assert_eq!(
+            apply_spoken_line_breaks("Hi Sarah Newline. Thanks for the update. Newline. Bye"),
+            "Hi Sarah\nThanks for the update.\nBye"
+        );
+        assert_eq!(
+            apply_spoken_line_breaks("Hi John, new paragraph, I wanted to follow up. New line"),
+            "Hi John,\n\nI wanted to follow up."
+        );
+    }
+
+    #[test]
+    fn ordinary_new_line_phrases_are_kept() {
+        for text in [
+            "We launched a new line of products.",
+            "Thanks. New line of products launched today.",
+            "the new paragraph reads better",
+            "Draw a new line here.",
+            "Add a newline character.",
+        ] {
+            assert_eq!(apply_spoken_line_breaks(text), text);
+        }
+    }
+
+    #[test]
+    fn command_mode_user_content_wraps_selection_and_instruction() {
+        assert_eq!(
+            build_command_mode_user_content("Hello wrld", "fix the typo"),
+            "<text>\nHello wrld\n</text>\n\n<instruction>\nfix the typo\n</instruction>"
+        );
+    }
+
+    #[test]
+    fn command_mode_system_prompt_gets_glossary() {
+        let prompt = build_system_prompt(
+            &crate::settings::default_command_mode_prompt(),
+            &words(&["Handy"]),
+        );
+        assert!(prompt.starts_with("You edit text for the user."));
+        assert!(prompt.ends_with("use this exact spelling:\n- Handy"));
+    }
+
+    #[test]
+    fn command_mode_issues_have_distinct_notices() {
+        let notices = [
+            CommandModeIssue::NoSelection,
+            CommandModeIssue::SecureInput,
+            CommandModeIssue::NoProvider,
+            CommandModeIssue::Failed,
+        ]
+        .map(CommandModeIssue::notice);
+        let unique: std::collections::HashSet<_> = notices.iter().collect();
+        assert_eq!(unique.len(), notices.len());
+        assert!(notices.iter().all(|n| n.starts_with("command-")));
     }
 
     #[test]

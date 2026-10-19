@@ -15,6 +15,7 @@ mod macos {
     // kVK_ANSI_V. This is the behavior Handy used before layout-aware
     // resolution and remains the safest fallback if macOS cannot expose the
     // active layout.
+    const ANSI_C_KEYCODE: u16 = 8;
     const ANSI_V_KEYCODE: u16 = 9;
     const KEYCODE_COUNT: u16 = 128;
     const UC_KEY_ACTION_DISPLAY: u16 = 3;
@@ -74,7 +75,8 @@ mod macos {
     ///
     /// TIS APIs must run on the main thread. Handy's paste path already enters
     /// through `AppHandle::run_on_main_thread` before reaching this function.
-    fn resolve_command_v_keycode() -> Result<u16, String> {
+    /// Keycode that produces `letter` with Command held in the active layout.
+    fn resolve_command_keycode(letter: u8) -> Result<u16, String> {
         // SAFETY: This function is called on the macOS main thread. The returned
         // source follows the Create Rule and is released by InputSource::drop.
         let source = InputSource(unsafe { TISCopyCurrentKeyboardLayoutInputSource() });
@@ -123,15 +125,20 @@ mod macos {
                 )
             };
 
-            status == 0 && length == 1 && chars[0] == u16::from(b'v')
+            status == 0 && length == 1 && chars[0] == u16::from(letter)
         })
-        .ok_or_else(|| "could not map Cmd+V in the current macOS keyboard layout".to_string())?;
+        .ok_or_else(|| {
+            format!(
+                "could not map Cmd+{} in the current macOS keyboard layout",
+                char::from(letter).to_ascii_uppercase()
+            )
+        })?;
 
         Ok(keycode)
     }
 
     pub(super) fn command_v_key() -> Key {
-        match resolve_command_v_keycode() {
+        match resolve_command_keycode(b'v') {
             Ok(keycode) => {
                 debug!("Resolved Cmd+V for the active macOS layout to keycode {keycode}");
                 Key::Other(u32::from(keycode))
@@ -141,6 +148,18 @@ mod macos {
                     "Could not resolve Cmd+V for the active macOS layout ({error}); using ANSI V keycode {ANSI_V_KEYCODE}"
                 );
                 Key::Other(u32::from(ANSI_V_KEYCODE))
+            }
+        }
+    }
+
+    pub(super) fn command_c_key() -> Key {
+        match resolve_command_keycode(b'c') {
+            Ok(keycode) => Key::Other(u32::from(keycode)),
+            Err(error) => {
+                warn!(
+                    "Could not resolve Cmd+C for the active macOS layout ({error}); using ANSI C keycode {ANSI_C_KEYCODE}"
+                );
+                Key::Other(u32::from(ANSI_C_KEYCODE))
             }
         }
     }
@@ -164,6 +183,38 @@ pub fn get_cursor_position(app_handle: &AppHandle) -> Option<(i32, i32)> {
     let enigo_state = app_handle.try_state::<EnigoState>()?;
     let enigo = enigo_state.0.lock().ok()?;
     enigo.location().ok()
+}
+
+/// Sends Cmd+C (macOS) or Ctrl+C to copy the current selection, using
+/// layout-independent key codes like the paste helpers.
+///
+/// The user may still be holding the shortcut's modifiers. enigo sets explicit
+/// event flags on macOS so they don't leak into the chord; elsewhere, release
+/// Shift/Alt/Meta first so the target sees a plain Ctrl+C.
+pub fn send_copy_ctrl_c(enigo: &mut Enigo) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let (modifier_key, c_key_code) = (Key::Meta, macos::command_c_key());
+    #[cfg(target_os = "windows")]
+    let (modifier_key, c_key_code) = (Key::Control, Key::Other(0x43)); // VK_C
+    #[cfg(target_os = "linux")]
+    let (modifier_key, c_key_code) = (Key::Control, Key::Unicode('c'));
+
+    #[cfg(not(target_os = "macos"))]
+    for key in [Key::Shift, Key::Alt, Key::Meta] {
+        let _ = enigo.key(key, enigo::Direction::Release);
+    }
+
+    enigo
+        .key(modifier_key, enigo::Direction::Press)
+        .map_err(|e| format!("Failed to press modifier key: {}", e))?;
+    let click = enigo
+        .key(c_key_code, enigo::Direction::Click)
+        .map_err(|e| format!("Failed to click C key: {}", e));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    enigo
+        .key(modifier_key, enigo::Direction::Release)
+        .map_err(|e| format!("Failed to release modifier key: {}", e))?;
+    click
 }
 
 /// Sends a Ctrl+V or Cmd+V paste command using platform-specific virtual key codes.

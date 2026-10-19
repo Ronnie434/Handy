@@ -10,6 +10,7 @@ pub mod cli;
 mod clipboard;
 mod commands;
 pub mod engine_supervisor;
+mod frontmost_app;
 mod helpers;
 mod input;
 mod llm_client;
@@ -19,6 +20,7 @@ mod overlay;
 mod paste_tx;
 pub mod portable;
 mod secure_input;
+mod selection;
 mod settings;
 mod shortcut;
 mod signal_handle;
@@ -687,6 +689,12 @@ pub fn run(cli_args: CliArgs) {
             shortcut::update_post_process_prompt,
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
+            shortcut::upsert_post_process_app_rule,
+            shortcut::delete_post_process_app_rule,
+            shortcut::get_last_detected_app,
+            shortcut::change_command_mode_prompt_setting,
+            shortcut::reset_command_mode_prompt,
+            shortcut::change_post_process_selection_commands_setting,
             shortcut::update_custom_words,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,

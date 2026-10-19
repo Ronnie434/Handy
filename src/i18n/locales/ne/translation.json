@@ -144,6 +144,10 @@
           "transcribe_with_post_process": {
             "name": "पोस्ट-प्रोसेसिङ हटकी",
             "description": "वैकल्पिक: तपाईंको ट्रान्सक्रिप्सनमा सधैँ AI पोस्ट-प्रोसेसिङ लागू गर्ने छुट्टै हटकी।"
+          },
+          "command_mode": {
+            "name": "Command Mode Shortcut",
+            "description": "Optional dedicated shortcut for command mode. The post-processing hotkey also does this when text is selected."
           }
         },
         "errors": {
@@ -442,6 +446,46 @@
         "cancel": "रद्द गर्नुहोस्",
         "selectToEdit": "विवरण हेर्न र सम्पादन गर्न माथिबाट प्रम्प्ट चयन गर्नुहोस्।",
         "createFirst": "आफ्नो पहिलो पोस्ट-प्रोसेसिङ प्रम्प्ट बनाउन माथिको 'नयाँ प्रम्प्ट बनाउनुहोस्' क्लिक गर्नुहोस्।"
+      },
+      "appRules": {
+        "title": "App Rules",
+        "lastDetected": {
+          "title": "Last Detected App",
+          "description": "The app that was in front when you last started a recording. Record once in an app, then use it here to create a rule.",
+          "none": "No app detected yet",
+          "use": "Use this app",
+          "refresh": "Refresh last detected app"
+        },
+        "rules": {
+          "title": "Rules",
+          "description": "Use a different prompt depending on the app you dictate into. When no rule matches, the selected prompt is used.",
+          "empty": "No app rules yet. Add one below.",
+          "missingPrompt": "Missing prompt",
+          "edit": "Edit",
+          "delete": "Delete"
+        },
+        "form": {
+          "addTitle": "Add Rule",
+          "editTitle": "Edit Rule",
+          "appIdPlaceholder": "App identifier (e.g. com.tinyspeck.slackmacgap or slack.exe)",
+          "appNamePlaceholder": "Display name (optional)",
+          "add": "Add Rule",
+          "save": "Save Rule"
+        }
+      },
+      "commandMode": {
+        "title": "Command Mode",
+        "prompt": {
+          "title": "Command Mode Prompt",
+          "description": "System prompt sent with your selected text and spoken instruction. Select text, press the Command Mode shortcut, say what to change (e.g. \"make this more formal\"), and the result replaces the selection.",
+          "tip": "The selected text is sent inside <text> tags and your instruction inside <instruction> tags. Your custom words are appended as a spelling glossary.",
+          "save": "Save Prompt",
+          "reset": "Reset to Default"
+        },
+        "selectionCommands": {
+          "label": "Edit Selected Text with the Post-Processing Hotkey",
+          "description": "When text is selected, the post-processing hotkey treats what you say as an instruction for that text (e.g. \"make this shorter\") and replaces it. With nothing selected it dictates as usual. One shortcut does both."
+        }
       }
     },
     "history": {
@@ -676,7 +720,14 @@
     "modelLoadFailedUnknown": "अज्ञात मोडेल",
     "pasteFailedTitle": "टेक्स्ट पेस्ट गर्न सकिएन",
     "pasteFailed": "सक्रिय एपमा टेक्स्ट पेस्ट गर्न सकिएन।",
-    "transcriptionFailedTitle": "ट्रान्सक्रिप्सन गर्न सकिएन"
+    "transcriptionFailedTitle": "ट्रान्सक्रिप्सन गर्न सकिएन",
+    "commandMode": {
+      "noSelection": "No text was selected. Select the text you want to change, then try again.",
+      "secureInput": "Secure input is active (for example a password field), so Handy can't copy or paste here.",
+      "noProvider": "Command mode needs a post-processing provider and model. Set them up in the Post-processing settings.",
+      "failed": "The AI request failed, so your text was left unchanged. Check the post-processing provider and try again."
+    },
+    "commandModeTitle": "Command Mode"
   },
   "appLanguage": {
     "title": "एपको भाषा",
@@ -694,7 +745,13 @@
   "overlay": {
     "transcribing": "ट्रान्सक्राइब गरिँदैछ...",
     "processing": "प्रशोधन गरिँदैछ...",
-    "loadingModel": "मोडेल लोड गरिँदैछ..."
+    "loadingModel": "मोडेल लोड गरिँदैछ...",
+    "commandMode": {
+      "noSelection": "Select text first",
+      "secureInput": "Secure input is on",
+      "noProvider": "No AI model set up",
+      "failed": "Command failed"
+    }
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} ले 1 सर्टकट रोकिरहेको हुन सक्छ",

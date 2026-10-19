@@ -144,6 +144,10 @@
           "transcribe_with_post_process": {
             "name": "후처리 단축키",
             "description": "선택 사항: 항상 AI 후처리를 적용하는 전용 단축키입니다."
+          },
+          "command_mode": {
+            "name": "Command Mode Shortcut",
+            "description": "Optional dedicated shortcut for command mode. The post-processing hotkey also does this when text is selected."
           }
         },
         "errors": {
@@ -442,6 +446,46 @@
         "cancel": "취소",
         "selectToEdit": "세부 정보를 보고 편집하려면 위에서 프롬프트를 선택하세요.",
         "createFirst": "첫 번째 후처리 프롬프트를 만들려면 위의 '새 프롬프트 만들기'를 클릭하세요."
+      },
+      "appRules": {
+        "title": "App Rules",
+        "lastDetected": {
+          "title": "Last Detected App",
+          "description": "The app that was in front when you last started a recording. Record once in an app, then use it here to create a rule.",
+          "none": "No app detected yet",
+          "use": "Use this app",
+          "refresh": "Refresh last detected app"
+        },
+        "rules": {
+          "title": "Rules",
+          "description": "Use a different prompt depending on the app you dictate into. When no rule matches, the selected prompt is used.",
+          "empty": "No app rules yet. Add one below.",
+          "missingPrompt": "Missing prompt",
+          "edit": "Edit",
+          "delete": "Delete"
+        },
+        "form": {
+          "addTitle": "Add Rule",
+          "editTitle": "Edit Rule",
+          "appIdPlaceholder": "App identifier (e.g. com.tinyspeck.slackmacgap or slack.exe)",
+          "appNamePlaceholder": "Display name (optional)",
+          "add": "Add Rule",
+          "save": "Save Rule"
+        }
+      },
+      "commandMode": {
+        "title": "Command Mode",
+        "prompt": {
+          "title": "Command Mode Prompt",
+          "description": "System prompt sent with your selected text and spoken instruction. Select text, press the Command Mode shortcut, say what to change (e.g. \"make this more formal\"), and the result replaces the selection.",
+          "tip": "The selected text is sent inside <text> tags and your instruction inside <instruction> tags. Your custom words are appended as a spelling glossary.",
+          "save": "Save Prompt",
+          "reset": "Reset to Default"
+        },
+        "selectionCommands": {
+          "label": "Edit Selected Text with the Post-Processing Hotkey",
+          "description": "When text is selected, the post-processing hotkey treats what you say as an instruction for that text (e.g. \"make this shorter\") and replaces it. With nothing selected it dictates as usual. One shortcut does both."
+        }
       }
     },
     "history": {
@@ -673,7 +717,14 @@
     "modelLoadFailedUnknown": "알 수 없는 모델",
     "pasteFailedTitle": "텍스트 붙여넣기 실패",
     "pasteFailed": "활성 애플리케이션에 텍스트를 붙여넣을 수 없습니다.",
-    "transcriptionFailedTitle": "음성 인식 실패"
+    "transcriptionFailedTitle": "음성 인식 실패",
+    "commandMode": {
+      "noSelection": "No text was selected. Select the text you want to change, then try again.",
+      "secureInput": "Secure input is active (for example a password field), so Handy can't copy or paste here.",
+      "noProvider": "Command mode needs a post-processing provider and model. Set them up in the Post-processing settings.",
+      "failed": "The AI request failed, so your text was left unchanged. Check the post-processing provider and try again."
+    },
+    "commandModeTitle": "Command Mode"
   },
   "appLanguage": {
     "title": "애플리케이션 언어",
@@ -691,7 +742,13 @@
   "overlay": {
     "transcribing": "텍스트로 변환 중...",
     "processing": "처리 중...",
-    "loadingModel": "모델 로딩 중..."
+    "loadingModel": "모델 로딩 중...",
+    "commandMode": {
+      "noSelection": "Select text first",
+      "secureInput": "Secure input is on",
+      "noProvider": "No AI model set up",
+      "failed": "Command failed"
+    }
   },
   "whatsNew": {
     "title": "Handy v{{version}}의 새 소식"

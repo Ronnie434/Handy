@@ -630,6 +630,25 @@ pub fn show_processing_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing");
 }
 
+/// How long a command mode notice stays on screen.
+const NOTICE_DURATION: std::time::Duration = std::time::Duration::from_millis(1800);
+
+/// Briefly shows a short message in the overlay (e.g. "no-selection"), then
+/// hides it unless another overlay state was shown in the meantime.
+pub fn show_notice_overlay(app_handle: &AppHandle, notice: &str) {
+    show_overlay_state(app_handle, notice);
+    let handle = app_handle.clone();
+    std::thread::spawn(move || {
+        // Let the main-thread show land so its generation bump is observed.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let shown_at = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);
+        std::thread::sleep(NOTICE_DURATION);
+        if OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst) == shown_at {
+            hide_recording_overlay(&handle);
+        }
+    });
+}
+
 /// Updates the overlay window position based on current settings
 pub fn update_overlay_position(app_handle: &AppHandle) {
     // Positioning queries monitors/cursor (GDK/Xlib on Linux) and moves the

@@ -22,9 +22,10 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
-    self, get_settings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
-    LLMPrompt, OverlayPosition, OverlayStyle, PasteMethod, ShortcutActivation, ShortcutBinding,
-    SoundTheme, Theme, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
+    self, get_settings, AppPromptRule, AutoSubmitKey, ChineseScript, ClipboardHandling,
+    KeyboardImplementation, LLMPrompt, OverlayPosition, OverlayStyle, PasteMethod,
+    ShortcutActivation, ShortcutBinding, SoundTheme, Theme, TypingTool, VadBackend,
+    APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -305,7 +306,7 @@ pub fn resume_all_shortcuts(app: &AppHandle) {
         if id == "cancel" {
             continue;
         }
-        if id == "transcribe_with_post_process" && !settings.post_process_enabled {
+        if crate::settings::binding_requires_post_process(id) && !settings.post_process_enabled {
             continue;
         }
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -497,7 +498,9 @@ fn register_all_shortcuts_for_implementation(
         }
 
         // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
+        if crate::settings::binding_requires_post_process(id)
+            && !current_settings.post_process_enabled
+        {
             continue;
         }
 
@@ -1055,16 +1058,15 @@ pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Res
     settings.post_process_enabled = enabled;
     settings::write_settings(&app, settings.clone());
 
-    // Register or unregister the post-processing shortcut
-    if let Some(binding) = settings
-        .bindings
-        .get("transcribe_with_post_process")
-        .cloned()
-    {
+    // Register or unregister the shortcuts that need post-processing
+    for (id, binding) in &settings.bindings {
+        if !settings::binding_requires_post_process(id) {
+            continue;
+        }
         if enabled {
-            let _ = register_shortcut(&app, binding);
+            let _ = register_shortcut(&app, binding.clone());
         } else {
-            let _ = unregister_shortcut(&app, binding);
+            let _ = unregister_shortcut(&app, binding.clone());
         }
     }
 
@@ -1259,6 +1261,11 @@ pub fn delete_post_process_prompt(app: AppHandle, id: String) -> Result<(), Stri
             settings.post_process_prompts.first().map(|p| p.id.clone());
     }
 
+    // App rules that pointed at the deleted prompt would never match again.
+    settings
+        .post_process_app_rules
+        .retain(|rule| rule.prompt_id != id);
+
     settings::write_settings(&app, settings);
     Ok(())
 }
@@ -1306,6 +1313,106 @@ pub async fn fetch_post_process_models(
     }
 
     crate::llm_client::fetch_models(provider, api_key).await
+}
+
+/// Adds an app rule, or replaces the rule for `previous_app_id` (when editing)
+/// or for the same app id. App ids compare case-insensitively.
+#[tauri::command]
+#[specta::specta]
+pub fn upsert_post_process_app_rule(
+    app: AppHandle,
+    previous_app_id: Option<String>,
+    app_id: String,
+    app_name: String,
+    prompt_id: String,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    let app_id = app_id.trim().to_string();
+    if app_id.is_empty() {
+        return Err("App identifier is required".to_string());
+    }
+    if !settings
+        .post_process_prompts
+        .iter()
+        .any(|p| p.id == prompt_id)
+    {
+        return Err(format!("Prompt with id '{}' not found", prompt_id));
+    }
+
+    let rule = AppPromptRule {
+        app_name: if app_name.trim().is_empty() {
+            app_id.clone()
+        } else {
+            app_name.trim().to_string()
+        },
+        app_id,
+        prompt_id,
+    };
+    settings::upsert_app_rule(
+        &mut settings.post_process_app_rules,
+        previous_app_id.as_deref(),
+        rule,
+    );
+
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn delete_post_process_app_rule(app: AppHandle, app_id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    let original_len = settings.post_process_app_rules.len();
+    settings
+        .post_process_app_rules
+        .retain(|rule| !rule.app_id.eq_ignore_ascii_case(&app_id));
+    if settings.post_process_app_rules.len() == original_len {
+        return Err(format!("No app rule for '{}'", app_id));
+    }
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_command_mode_prompt_setting(app: AppHandle, prompt: String) -> Result<(), String> {
+    if prompt.trim().is_empty() {
+        return Err("Command mode prompt cannot be empty".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.command_mode_prompt = prompt;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_post_process_selection_commands_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.post_process_selection_commands = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+/// Restores the built-in command mode prompt and returns it.
+#[tauri::command]
+#[specta::specta]
+pub fn reset_command_mode_prompt(app: AppHandle) -> Result<String, String> {
+    let mut settings = settings::get_settings(&app);
+    settings.command_mode_prompt = settings::default_command_mode_prompt();
+    let prompt = settings.command_mode_prompt.clone();
+    settings::write_settings(&app, settings);
+    Ok(prompt)
+}
+
+/// The app that was frontmost when the most recent recording started.
+#[tauri::command]
+#[specta::specta]
+pub fn get_last_detected_app() -> Option<crate::frontmost_app::FrontmostApp> {
+    crate::frontmost_app::last_detected()
 }
 
 #[tauri::command]

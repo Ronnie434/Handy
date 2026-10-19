@@ -13,7 +13,25 @@ import i18n, { syncLanguageFromSettings } from "@/i18n";
 import type { ModelStateEvent } from "@/lib/types/events";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 
-type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
+type CommandNotice =
+  | "command-no-selection"
+  | "command-secure-input"
+  | "command-no-provider"
+  | "command-failed";
+
+type OverlayState =
+  | "recording"
+  | "streaming"
+  | "transcribing"
+  | "processing"
+  | CommandNotice;
+
+const COMMAND_NOTICE_KEYS: Record<CommandNotice, string> = {
+  "command-no-selection": "overlay.commandMode.noSelection",
+  "command-secure-input": "overlay.commandMode.secureInput",
+  "command-no-provider": "overlay.commandMode.noProvider",
+  "command-failed": "overlay.commandMode.failed",
+};
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
@@ -340,6 +358,27 @@ const RecordingOverlay: React.FC = () => {
                 true,
               )
             : listeningRow(open, true)}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Command mode notice: a short message in the compact pill, hidden by
+  // the backend after a moment.
+  if (state in COMMAND_NOTICE_KEYS) {
+    return (
+      <div
+        dir={direction}
+        className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      >
+        <div className={`scard compact ${isVisible ? "cworking" : ""}`}>
+          <div className="sbase">
+            <div className="sbase-l" />
+            <span className="swork-label">
+              {t(COMMAND_NOTICE_KEYS[state as CommandNotice])}
+            </span>
+            <div className="sbase-r" />
+          </div>
         </div>
       </div>
     );

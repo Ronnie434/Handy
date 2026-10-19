@@ -20,6 +20,8 @@ import { ApiKeyField } from "../PostProcessingSettingsApi/ApiKeyField";
 import { ModelSelect } from "../PostProcessingSettingsApi/ModelSelect";
 import { usePostProcessProviderState } from "../PostProcessingSettingsApi/usePostProcessProviderState";
 import { ShortcutInput } from "../ShortcutInput";
+import { PostProcessingAppRules } from "./PostProcessingAppRules";
+import { PostProcessingCommandMode } from "./PostProcessingCommandMode";
 import { useSettings } from "../../../hooks/useSettings";
 
 const PostProcessingSettingsApiComponent: React.FC = () => {
@@ -481,6 +483,14 @@ export const PostProcessingSettings: React.FC = () => {
 
       <SettingsGroup title={t("settings.postProcessing.prompts.title")}>
         <PostProcessingSettingsPrompts />
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.postProcessing.appRules.title")}>
+        <PostProcessingAppRules />
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.postProcessing.commandMode.title")}>
+        <PostProcessingCommandMode />
       </SettingsGroup>
     </div>
   );

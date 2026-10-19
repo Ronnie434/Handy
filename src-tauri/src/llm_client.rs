@@ -54,6 +54,15 @@ impl ReasoningParams {
     }
 }
 
+/// Text cleanup should give the same answer every time. Local servers behind
+/// the custom provider (Ollama, LM Studio) otherwise sample with the model's
+/// default temperature, which for small models visibly changes the output from
+/// one recording to the next. Hosted providers keep their defaults, since some
+/// reasoning models reject a temperature.
+fn deterministic_temperature(provider: &PostProcessProvider) -> Option<f32> {
+    (provider.id == "custom").then_some(0.0)
+}
+
 /// Pick the reasoning-disable request fields an endpoint understands.
 /// Unknown endpoints get the common OpenAI-style field; if they reject it,
 /// the request is retried without it (see `send_chat_completion_with_schema`).
@@ -116,6 +125,8 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     #[serde(flatten)]
     reasoning: ReasoningParams,
 }
@@ -431,6 +442,7 @@ pub async fn send_chat_completion_with_schema(
         messages,
         stream: false,
         response_format,
+        temperature: deterministic_temperature(provider),
         reasoning,
     };
 
@@ -705,6 +717,7 @@ mod tests {
             }],
             stream: false,
             response_format: None,
+            temperature: None,
             reasoning,
         };
         serde_json::to_value(&request).unwrap()
