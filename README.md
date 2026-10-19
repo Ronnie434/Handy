@@ -56,7 +56,7 @@ This fork adds Wispr Flow-style features on top of Handy's LLM post-processing. 
 
    `gemma4:e4b` passed every Smart Format and command-mode check in local testing and answers in under a second on an M-series Mac. Larger models work too; very small ones (e.g. `llama3.2`) tend to answer questions instead of cleaning them up.
 
-2. Handy asks Ollama to keep the model loaded for 1 hour after each request (Ollama's own default is 5 minutes), so only the first request after a long break waits 10-20 seconds while the model loads.
+2. Ollama unloads the model 5 minutes after its last use, which frees its memory (about 9.5 GB for `gemma4:e4b`). The first dictation after a longer break waits 10-20 seconds while the model loads again.
 
 3. In Handy:
    - **Fresh installs need nothing else.** They start with post-processing on, provider **Custom** (Ollama at `http://localhost:11434/v1`), model `gemma4:e4b` and the **Smart Format (Wispr-style)** prompt selected. Hold **Option+Shift+Space** to dictate with cleanup, or select text first to give a command.

@@ -63,16 +63,6 @@ fn deterministic_temperature(provider: &PostProcessProvider) -> Option<f32> {
     (provider.id == "custom").then_some(0.0)
 }
 
-/// Ollama unloads a model 5 minutes after its last request, and reloading takes
-/// 10-20 seconds, which would land on the first dictation after a short break.
-/// The menu-bar app ignores OLLAMA_KEEP_ALIVE, so ask per request instead.
-/// Other servers behind the custom provider ignore the unknown field.
-const LOCAL_KEEP_ALIVE: &str = "1h";
-
-fn local_keep_alive(provider: &PostProcessProvider) -> Option<&'static str> {
-    (provider.id == "custom").then_some(LOCAL_KEEP_ALIVE)
-}
-
 /// Pick the reasoning-disable request fields an endpoint understands.
 /// Unknown endpoints get the common OpenAI-style field; if they reject it,
 /// the request is retried without it (see `send_chat_completion_with_schema`).
@@ -137,9 +127,6 @@ struct ChatCompletionRequest {
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    /// Ollama extension: how long the model stays loaded after this request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    keep_alive: Option<&'static str>,
     #[serde(flatten)]
     reasoning: ReasoningParams,
 }
@@ -456,7 +443,6 @@ pub async fn send_chat_completion_with_schema(
         stream: false,
         response_format,
         temperature: deterministic_temperature(provider),
-        keep_alive: local_keep_alive(provider),
         reasoning,
     };
 
@@ -732,7 +718,6 @@ mod tests {
             stream: false,
             response_format: None,
             temperature: None,
-            keep_alive: None,
             reasoning,
         };
         serde_json::to_value(&request).unwrap()
