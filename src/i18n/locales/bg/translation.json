@@ -144,6 +144,10 @@
           "transcribe_with_post_process": {
             "name": "Бърз клавиш за постобработка",
             "description": "По избор: отделна комбинация, която винаги прилага ИИ постобработка върху транскрипцията."
+          },
+          "command_mode": {
+            "name": "Command Mode Shortcut",
+            "description": "Select text, then use this shortcut and speak an instruction. The rewritten text replaces your selection."
           }
         },
         "errors": {
@@ -468,6 +472,16 @@
           "add": "Add Rule",
           "save": "Save Rule"
         }
+      },
+      "commandMode": {
+        "title": "Command Mode",
+        "prompt": {
+          "title": "Command Mode Prompt",
+          "description": "System prompt sent with your selected text and spoken instruction. Select text, press the Command Mode shortcut, say what to change (e.g. \"make this more formal\"), and the result replaces the selection.",
+          "tip": "The selected text is sent inside <text> tags and your instruction inside <instruction> tags. Your custom words are appended as a spelling glossary.",
+          "save": "Save Prompt",
+          "reset": "Reset to Default"
+        }
       }
     },
     "history": {
@@ -699,7 +713,14 @@
     "modelLoadFailedUnknown": "неизвестен модел",
     "pasteFailedTitle": "Неуспешно поставяне на текст",
     "pasteFailed": "Текстът не можа да бъде поставен в активното приложение.",
-    "transcriptionFailedTitle": "Неуспешна транскрипция"
+    "transcriptionFailedTitle": "Неуспешна транскрипция",
+    "commandMode": {
+      "noSelection": "No text was selected. Select the text you want to change, then try again.",
+      "secureInput": "Secure input is active (for example a password field), so Handy can't copy or paste here.",
+      "noProvider": "Command mode needs a post-processing provider and model. Set them up in the Post-processing settings.",
+      "failed": "The AI request failed, so your text was left unchanged. Check the post-processing provider and try again."
+    },
+    "commandModeTitle": "Command Mode"
   },
   "appLanguage": {
     "title": "Език на приложението",
@@ -717,7 +738,13 @@
   "overlay": {
     "transcribing": "Транскрибиране...",
     "processing": "Обработка...",
-    "loadingModel": "Зареждане на модела..."
+    "loadingModel": "Зареждане на модела...",
+    "commandMode": {
+      "noSelection": "Select text first",
+      "secureInput": "Secure input is on",
+      "noProvider": "No AI model set up",
+      "failed": "Command failed"
+    }
   },
   "whatsNew": {
     "title": "Ново в Handy v{{version}}"

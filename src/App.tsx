@@ -202,6 +202,26 @@ function App() {
     };
   }, [t]);
 
+  // Command mode problems also show in the overlay; the toast explains them
+  // in full when the main window is open (or the overlay is disabled).
+  useEffect(() => {
+    const unlisten = listen<string>("command-mode-error", (event) => {
+      const reason = event.payload.replace(/^command-/, "");
+      const key =
+        {
+          "no-selection": "noSelection",
+          "secure-input": "secureInput",
+          "no-provider": "noProvider",
+        }[reason] ?? "failed";
+      toast.error(t("errors.commandModeTitle"), {
+        description: t(`errors.commandMode.${key}`),
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [t]);
+
   // Listen for model loading failures and show a toast
   useEffect(() => {
     const unlisten = listen<ModelStateEvent>("model-state-changed", (event) => {

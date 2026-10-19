@@ -306,7 +306,7 @@ pub fn resume_all_shortcuts(app: &AppHandle) {
         if id == "cancel" {
             continue;
         }
-        if id == "transcribe_with_post_process" && !settings.post_process_enabled {
+        if crate::settings::binding_requires_post_process(id) && !settings.post_process_enabled {
             continue;
         }
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -498,7 +498,9 @@ fn register_all_shortcuts_for_implementation(
         }
 
         // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
+        if crate::settings::binding_requires_post_process(id)
+            && !current_settings.post_process_enabled
+        {
             continue;
         }
 
@@ -1056,16 +1058,15 @@ pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Res
     settings.post_process_enabled = enabled;
     settings::write_settings(&app, settings.clone());
 
-    // Register or unregister the post-processing shortcut
-    if let Some(binding) = settings
-        .bindings
-        .get("transcribe_with_post_process")
-        .cloned()
-    {
+    // Register or unregister the shortcuts that need post-processing
+    for (id, binding) in &settings.bindings {
+        if !settings::binding_requires_post_process(id) {
+            continue;
+        }
         if enabled {
-            let _ = register_shortcut(&app, binding);
+            let _ = register_shortcut(&app, binding.clone());
         } else {
-            let _ = unregister_shortcut(&app, binding);
+            let _ = unregister_shortcut(&app, binding.clone());
         }
     }
 
@@ -1370,6 +1371,29 @@ pub fn delete_post_process_app_rule(app: AppHandle, app_id: String) -> Result<()
     }
     settings::write_settings(&app, settings);
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_command_mode_prompt_setting(app: AppHandle, prompt: String) -> Result<(), String> {
+    if prompt.trim().is_empty() {
+        return Err("Command mode prompt cannot be empty".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.command_mode_prompt = prompt;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+/// Restores the built-in command mode prompt and returns it.
+#[tauri::command]
+#[specta::specta]
+pub fn reset_command_mode_prompt(app: AppHandle) -> Result<String, String> {
+    let mut settings = settings::get_settings(&app);
+    settings.command_mode_prompt = settings::default_command_mode_prompt();
+    let prompt = settings.command_mode_prompt.clone();
+    settings::write_settings(&app, settings);
+    Ok(prompt)
 }
 
 /// The app that was frontmost when the most recent recording started.

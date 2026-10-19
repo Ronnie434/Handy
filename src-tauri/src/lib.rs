@@ -691,6 +691,8 @@ pub fn run(cli_args: CliArgs) {
             shortcut::upsert_post_process_app_rule,
             shortcut::delete_post_process_app_rule,
             shortcut::get_last_detected_app,
+            shortcut::change_command_mode_prompt_setting,
+            shortcut::reset_command_mode_prompt,
             shortcut::update_custom_words,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,

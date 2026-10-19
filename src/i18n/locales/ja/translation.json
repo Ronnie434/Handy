@@ -171,6 +171,10 @@
           "transcribe_with_post_process": {
             "name": "後処理のショートカット",
             "description": "文字起こしに常に AI 後処理を適用するキーボードショートカット。 (任意)"
+          },
+          "command_mode": {
+            "name": "Command Mode Shortcut",
+            "description": "Select text, then use this shortcut and speak an instruction. The rewritten text replaces your selection."
           }
         },
         "errors": {
@@ -468,6 +472,16 @@
           "add": "Add Rule",
           "save": "Save Rule"
         }
+      },
+      "commandMode": {
+        "title": "Command Mode",
+        "prompt": {
+          "title": "Command Mode Prompt",
+          "description": "System prompt sent with your selected text and spoken instruction. Select text, press the Command Mode shortcut, say what to change (e.g. \"make this more formal\"), and the result replaces the selection.",
+          "tip": "The selected text is sent inside <text> tags and your instruction inside <instruction> tags. Your custom words are appended as a spelling glossary.",
+          "save": "Save Prompt",
+          "reset": "Reset to Default"
+        }
       }
     },
     "history": {
@@ -699,7 +713,14 @@
     "modelLoadFailedUnknown": "不明なモデル",
     "pasteFailedTitle": "テキストの貼り付けに失敗しました",
     "pasteFailed": "アクティブなアプリにテキストを貼り付けられませんでした。",
-    "transcriptionFailedTitle": "文字起こしに失敗しました"
+    "transcriptionFailedTitle": "文字起こしに失敗しました",
+    "commandMode": {
+      "noSelection": "No text was selected. Select the text you want to change, then try again.",
+      "secureInput": "Secure input is active (for example a password field), so Handy can't copy or paste here.",
+      "noProvider": "Command mode needs a post-processing provider and model. Set them up in the Post-processing settings.",
+      "failed": "The AI request failed, so your text was left unchanged. Check the post-processing provider and try again."
+    },
+    "commandModeTitle": "Command Mode"
   },
   "appLanguage": {
     "title": "アプリの言語",
@@ -717,7 +738,13 @@
   "overlay": {
     "transcribing": "文字起こし中…",
     "processing": "処理中…",
-    "loadingModel": "モデルを読み込み中…"
+    "loadingModel": "モデルを読み込み中…",
+    "commandMode": {
+      "noSelection": "Select text first",
+      "secureInput": "Secure input is on",
+      "noProvider": "No AI model set up",
+      "failed": "Command failed"
+    }
   },
   "whatsNew": {
     "title": "Handy v{{version}} の新機能"

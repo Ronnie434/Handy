@@ -8,7 +8,9 @@ use crate::managers::model::ModelManager;
 use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, OverlayStyle, PostProcessProvider, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -57,6 +59,190 @@ pub trait ShortcutAction: Send + Sync {
 // Transcribe Action
 struct TranscribeAction {
     post_process: bool,
+    /// Command mode: the recording is an instruction applied to the text that
+    /// was selected when recording started, and the result replaces it.
+    command_mode: bool,
+}
+
+/// Text captured by command mode at recording start, consumed at stop.
+static COMMAND_SELECTION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Why command mode could not run; each maps to an overlay notice and a
+/// main-window toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandModeIssue {
+    NoSelection,
+    SecureInput,
+    NoProvider,
+    Failed,
+}
+
+impl CommandModeIssue {
+    /// Overlay state (and `command-mode-error` event payload) for this issue.
+    fn notice(self) -> &'static str {
+        match self {
+            CommandModeIssue::NoSelection => "command-no-selection",
+            CommandModeIssue::SecureInput => "command-secure-input",
+            CommandModeIssue::NoProvider => "command-no-provider",
+            CommandModeIssue::Failed => "command-failed",
+        }
+    }
+}
+
+fn report_command_mode_issue(app: &AppHandle, issue: CommandModeIssue) {
+    debug!("Command mode stopped: {:?}", issue);
+    utils::show_notice_overlay(app, issue.notice());
+    let _ = app.emit("command-mode-error", issue.notice());
+}
+
+/// Captures the selection command mode will edit. Returns false (after telling
+/// the user why) when command mode can't run, so no recording starts.
+fn begin_command_mode(app: &AppHandle) -> bool {
+    if let Ok(mut selection) = COMMAND_SELECTION.lock() {
+        *selection = None;
+    }
+
+    // Secure input (password fields, Secure Keyboard Entry) blocks the
+    // synthetic copy and paste keystrokes, so don't touch that field at all.
+    if crate::secure_input::is_enabled_now() {
+        report_command_mode_issue(app, CommandModeIssue::SecureInput);
+        return false;
+    }
+
+    if configured_llm(&get_settings(app)).is_none() {
+        report_command_mode_issue(app, CommandModeIssue::NoProvider);
+        return false;
+    }
+
+    match crate::clipboard::capture_selection(app) {
+        Ok(Some(text)) => {
+            debug!("Command mode captured {} chars of selection", text.len());
+            if let Ok(mut selection) = COMMAND_SELECTION.lock() {
+                *selection = Some(text);
+            }
+            true
+        }
+        Ok(None) => {
+            report_command_mode_issue(app, CommandModeIssue::NoSelection);
+            false
+        }
+        Err(e) => {
+            error!("Command mode could not copy the selection: {}", e);
+            report_command_mode_issue(app, CommandModeIssue::Failed);
+            false
+        }
+    }
+}
+
+/// User message for command mode: the selection and the spoken instruction.
+fn build_command_mode_user_content(selection: &str, instruction: &str) -> String {
+    format!("<text>\n{selection}\n</text>\n\n<instruction>\n{instruction}\n</instruction>")
+}
+
+/// Sends the selection and instruction to the active post-processing provider
+/// and returns the rewritten text, or `None` when the request fails.
+async fn run_command_mode(
+    settings: &AppSettings,
+    selection: &str,
+    instruction: &str,
+) -> Option<String> {
+    if is_blank_transcription(instruction) {
+        debug!("Command mode skipped because the instruction is empty");
+        return None;
+    }
+    let (provider, model) = configured_llm(settings)?;
+    let system_prompt = build_system_prompt(&settings.command_mode_prompt, &settings.custom_words);
+    let user_content = build_command_mode_user_content(selection, instruction);
+
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if !apple_intelligence::check_apple_intelligence_availability() {
+                debug!("Apple Intelligence selected but not currently available on this device");
+                return None;
+            }
+            let token_limit = model.trim().parse::<i32>().unwrap_or(0);
+            return match apple_intelligence::process_text_with_system_prompt(
+                &system_prompt,
+                &user_content,
+                token_limit,
+            ) {
+                Ok(result) if !result.trim().is_empty() => Some(strip_invisible_chars(&result)),
+                Ok(_) => {
+                    debug!("Apple Intelligence returned an empty command mode response");
+                    None
+                }
+                Err(err) => {
+                    error!("Apple Intelligence command mode failed: {}", err);
+                    None
+                }
+            };
+        }
+
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            debug!("Apple Intelligence provider selected on unsupported platform");
+            return None;
+        }
+    }
+
+    let api_key = settings
+        .post_process_api_keys
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+
+    match crate::llm_client::send_chat_completion_with_schema(
+        &provider,
+        api_key,
+        &model,
+        user_content,
+        Some(system_prompt),
+        None,
+        disable_reasoning,
+    )
+    .await
+    {
+        Ok(Some(content)) => {
+            let content = strip_invisible_chars(strip_think_block(&content));
+            if content.trim().is_empty() {
+                debug!("Command mode response was empty");
+                None
+            } else {
+                debug!(
+                    "Command mode succeeded for provider '{}'. Output length: {} chars",
+                    provider.id,
+                    content.len()
+                );
+                Some(content)
+            }
+        }
+        Ok(None) => {
+            error!("Command mode LLM response has no content");
+            None
+        }
+        Err(e) => {
+            error!("Command mode failed for provider '{}': {}", provider.id, e);
+            None
+        }
+    }
+}
+
+/// Output for a command mode recording. On failure `final_text` is empty, so
+/// nothing is pasted over the user's selection.
+async fn process_command_output(
+    app: &AppHandle,
+    instruction: &str,
+    selection: &str,
+) -> ProcessedTranscription {
+    let settings = get_settings(app);
+    let result = run_command_mode(&settings, selection, instruction).await;
+    ProcessedTranscription {
+        final_text: result.clone().unwrap_or_default(),
+        post_processed_text: result,
+        post_process_prompt: Some(settings.command_mode_prompt),
+    }
 }
 
 /// Field name for structured output JSON schema
@@ -150,16 +336,9 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
-async fn post_process_transcription(
-    settings: &AppSettings,
-    transcription: &str,
-    prompt_id: Option<&str>,
-) -> Option<String> {
-    if is_blank_transcription(transcription) {
-        debug!("Post-processing skipped because the transcription is empty");
-        return None;
-    }
-
+/// The active post-processing provider and its model, or `None` (logged) when
+/// either is missing.
+fn configured_llm(settings: &AppSettings) -> Option<(PostProcessProvider, String)> {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
@@ -181,6 +360,21 @@ async fn post_process_transcription(
         );
         return None;
     }
+
+    Some((provider, model))
+}
+
+async fn post_process_transcription(
+    settings: &AppSettings,
+    transcription: &str,
+    prompt_id: Option<&str>,
+) -> Option<String> {
+    if is_blank_transcription(transcription) {
+        debug!("Post-processing skipped because the transcription is empty");
+        return None;
+    }
+
+    let (provider, model) = configured_llm(settings)?;
 
     let selected_prompt_id = match prompt_id {
         Some(id) => id,
@@ -452,6 +646,10 @@ impl ShortcutAction for TranscribeAction {
         // post-processing can apply that app's prompt rule.
         crate::frontmost_app::detect_and_remember();
 
+        if self.command_mode && !begin_command_mode(app) {
+            return;
+        }
+
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
         let rm = app.state::<Arc<AudioRecordingManager>>();
@@ -664,6 +862,12 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let command_mode = self.command_mode;
+        let command_selection = if command_mode {
+            COMMAND_SELECTION.lock().ok().and_then(|mut s| s.take())
+        } else {
+            None
+        };
         let frontmost_app_id = crate::frontmost_app::last_detected().map(|app| app.id);
         let cancel_generation = rm.cancel_generation();
 
@@ -761,15 +965,32 @@ impl ShortcutAction for TranscribeAction {
                                     show_processing_overlay(&ah);
                                 }
                             }
-                            let Some(processed) = complete_unless_cancelled(
-                                process_transcription_output(
-                                    &ah,
-                                    &transcription,
-                                    post_process,
-                                    frontmost_app_id.as_deref(),
-                                ),
-                                || rm.was_cancelled_since(cancel_generation),
-                            )
+                            let output = async {
+                                match &command_selection {
+                                    Some(selection) => {
+                                        process_command_output(&ah, &transcription, selection).await
+                                    }
+                                    // Command mode always captures a selection before
+                                    // recording; never paste the instruction itself.
+                                    None if command_mode => ProcessedTranscription {
+                                        final_text: String::new(),
+                                        post_processed_text: None,
+                                        post_process_prompt: None,
+                                    },
+                                    None => {
+                                        process_transcription_output(
+                                            &ah,
+                                            &transcription,
+                                            post_process,
+                                            frontmost_app_id.as_deref(),
+                                        )
+                                        .await
+                                    }
+                                }
+                            };
+                            let Some(processed) = complete_unless_cancelled(output, || {
+                                rm.was_cancelled_since(cancel_generation)
+                            })
                             .await
                             else {
                                 debug!("Transcription operation cancelled during output handling");
@@ -799,7 +1020,11 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             if processed.final_text.is_empty() {
-                                utils::hide_recording_overlay(&ah);
+                                if command_mode {
+                                    report_command_mode_issue(&ah, CommandModeIssue::Failed);
+                                } else {
+                                    utils::hide_recording_overlay(&ah);
+                                }
                                 set_tray_state(&ah, TrayIconState::Idle);
                             } else {
                                 let ah_clone = ah.clone();
@@ -814,7 +1039,12 @@ impl ShortcutAction for TranscribeAction {
                                         return;
                                     }
 
-                                    match utils::paste(final_text, ah_clone.clone()) {
+                                    let pasted = if command_mode {
+                                        utils::paste_replacement(final_text, ah_clone.clone())
+                                    } else {
+                                        utils::paste(final_text, ah_clone.clone())
+                                    };
+                                    match pasted {
                                         Ok(()) => debug!(
                                             "Text pasted successfully in {:?}",
                                             paste_time.elapsed()
@@ -924,11 +1154,22 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
         "transcribe".to_string(),
         Arc::new(TranscribeAction {
             post_process: false,
+            command_mode: false,
         }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "transcribe_with_post_process".to_string(),
-        Arc::new(TranscribeAction { post_process: true }) as Arc<dyn ShortcutAction>,
+        Arc::new(TranscribeAction {
+            post_process: true,
+            command_mode: false,
+        }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "command_mode".to_string(),
+        Arc::new(TranscribeAction {
+            post_process: true,
+            command_mode: true,
+        }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),
@@ -944,9 +1185,9 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        append_custom_words_glossary, build_system_prompt, complete_unless_cancelled,
-        custom_words_glossary, is_blank_transcription, should_use_streaming_overlay,
-        strip_think_block,
+        append_custom_words_glossary, build_command_mode_user_content, build_system_prompt,
+        complete_unless_cancelled, custom_words_glossary, is_blank_transcription,
+        should_use_streaming_overlay, strip_think_block, CommandModeIssue,
     };
     use crate::settings::OverlayStyle;
     use std::future;
@@ -1032,6 +1273,38 @@ mod tests {
             append_custom_words_glossary("Transcript: hi".to_string(), &[]),
             "Transcript: hi"
         );
+    }
+
+    #[test]
+    fn command_mode_user_content_wraps_selection_and_instruction() {
+        assert_eq!(
+            build_command_mode_user_content("Hello wrld", "fix the typo"),
+            "<text>\nHello wrld\n</text>\n\n<instruction>\nfix the typo\n</instruction>"
+        );
+    }
+
+    #[test]
+    fn command_mode_system_prompt_gets_glossary() {
+        let prompt = build_system_prompt(
+            &crate::settings::default_command_mode_prompt(),
+            &words(&["Handy"]),
+        );
+        assert!(prompt.starts_with("You edit text for the user."));
+        assert!(prompt.ends_with("use this exact spelling:\n- Handy"));
+    }
+
+    #[test]
+    fn command_mode_issues_have_distinct_notices() {
+        let notices = [
+            CommandModeIssue::NoSelection,
+            CommandModeIssue::SecureInput,
+            CommandModeIssue::NoProvider,
+            CommandModeIssue::Failed,
+        ]
+        .map(CommandModeIssue::notice);
+        let unique: std::collections::HashSet<_> = notices.iter().collect();
+        assert_eq!(unique.len(), notices.len());
+        assert!(notices.iter().all(|n| n.starts_with("command-")));
     }
 
     #[test]

@@ -102,19 +102,63 @@ fn paste_via_clipboard(
 
     finish_clipboard_paste(paste_result, paste_delay_after_ms, || {
         // Restore original clipboard content even when key injection failed.
-        // Text takes priority so this path stays identical to the previous behavior;
-        // an image is only restored when the clipboard held no text at all, which is
-        // the case that used to silently wipe screenshots.
-        if let Some(clipboard_content) = saved_text {
-            let _ = write_text_to_clipboard(app_handle, &clipboard_content);
-        } else if let Some(image) = saved_image {
-            info!("Restoring image to clipboard");
-            let _ = clipboard.write_image(&image);
-        } else {
-            // Nothing was there to begin with — don't leave the transcription behind.
-            let _ = clipboard.clear();
-        }
+        restore_clipboard(app_handle, saved_text, saved_image)
     })
+}
+
+/// Puts back clipboard content saved before Handy borrowed the clipboard.
+/// Text takes priority; an image is only restored when the clipboard held no
+/// text at all (the case that used to silently wipe screenshots). When nothing
+/// was saved the clipboard is cleared so Handy's text isn't left behind.
+fn restore_clipboard(
+    app_handle: &AppHandle,
+    saved_text: Option<String>,
+    saved_image: Option<tauri::image::Image<'static>>,
+) {
+    let clipboard = app_handle.clipboard();
+    if let Some(clipboard_content) = saved_text {
+        let _ = write_text_to_clipboard(app_handle, &clipboard_content);
+    } else if let Some(image) = saved_image {
+        info!("Restoring image to clipboard");
+        let _ = clipboard.write_image(&image);
+    } else {
+        let _ = clipboard.clear();
+    }
+}
+
+/// How long to wait for the target app to answer the copy keystroke.
+const SELECTION_COPY_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Copies the current selection of the focused app by sending Cmd/Ctrl+C,
+/// then restores the user's clipboard. Returns `Ok(None)` when nothing (or
+/// only whitespace) was selected.
+pub fn capture_selection(app_handle: &AppHandle) -> Result<Option<String>, String> {
+    let clipboard = app_handle.clipboard();
+    let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
+    let saved_image = if saved_text.is_none() {
+        clipboard.read_image().ok().map(|image| image.to_owned())
+    } else {
+        None
+    };
+
+    // Start from an empty clipboard so an unchanged clipboard means "no selection".
+    let _ = clipboard.clear();
+    let copy_result = with_enigo(app_handle, input::send_copy_ctrl_c);
+
+    let mut selection = None;
+    if copy_result.is_ok() {
+        let deadline = std::time::Instant::now() + SELECTION_COPY_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            if let Some(text) = clipboard.read_text().ok().filter(|t| !t.trim().is_empty()) {
+                selection = Some(text);
+                break;
+            }
+        }
+    }
+
+    restore_clipboard(app_handle, saved_text, saved_image);
+    copy_result.map(|()| selection)
 }
 
 /// Attempts to send a key combination using Linux-native tools.
@@ -772,7 +816,23 @@ fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool
 }
 
 pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
-    let settings = get_settings(&app_handle);
+    paste_text(text, app_handle, false)
+}
+
+/// Pastes text that replaces the current selection (command mode). Unlike
+/// [`paste`], it never appends a trailing space, auto-submits, or leaves the
+/// text on the clipboard: the user is editing in place, not dictating.
+pub fn paste_replacement(text: String, app_handle: AppHandle) -> Result<(), String> {
+    paste_text(text, app_handle, true)
+}
+
+fn paste_text(text: String, app_handle: AppHandle, replacement: bool) -> Result<(), String> {
+    let mut settings = get_settings(&app_handle);
+    if replacement {
+        settings.append_trailing_space = false;
+        settings.auto_submit = false;
+        settings.clipboard_handling = ClipboardHandling::DontModify;
+    }
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
     let paste_delay_after_ms = settings.paste_delay_after_ms;
