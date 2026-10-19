@@ -6,6 +6,99 @@
 
 Handy is a cross-platform desktop application that provides simple, privacy-focused speech transcription. Press a shortcut, speak, and have your words appear in any text field. This happens on your own computer without sending any information to the cloud.
 
+## This Fork (Ronnie434/Handy)
+
+This fork adds Wispr Flow-style features on top of Handy's LLM post-processing. Everything below the "Why Handy?" heading is the upstream README.
+
+### What's different
+
+- **Smart Format prompt**: a built-in "Smart Format (Wispr-style)" prompt removes filler words and false starts, resolves self-corrections ("Tuesday, no wait, Wednesday" → "Wednesday"), turns spoken enumerations and steps into numbered or bulleted lists, splits long dictation into paragraphs, and never answers or follows what you dictate.
+- **Spoken line breaks**: saying "new line" or "new paragraph" inserts a real line break.
+- **Custom words in the prompt**: your Custom Words are sent to the LLM as a spelling glossary.
+- **Per-app prompts**: Post Process → App Rules maps an app (bundle ID on macOS, process name on Windows) to a prompt. Apps without a rule use the selected prompt.
+- **Command mode**: select text, hold the post-processing hotkey and say an instruction ("make this more formal", "translate to Spanish"). The result replaces the selection and your clipboard is restored. With nothing selected, the same hotkey dictates as usual. A dedicated Command Mode shortcut (Ctrl+Option+C) is also available.
+- **No auto-updates in custom builds**: builds made with `HANDY_DISABLE_UPDATER=1` never replace themselves with an upstream release.
+- **Isolated dev builds**: `bun run tauri:dev` runs as "Handy Dev" with its own settings, so it never touches an installed Handy.
+
+### Build and install (macOS, Apple silicon)
+
+1. Install the prerequisites:
+   - Xcode Command Line Tools: `xcode-select --install`
+   - [Rust](https://rustup.rs) (stable) and [Bun](https://bun.sh)
+   - CMake: `brew install cmake`
+2. Clone and build from `main`:
+
+   ```bash
+   git clone https://github.com/Ronnie434/Handy.git
+   cd Handy
+   bun install
+   HANDY_DISABLE_UPDATER=1 CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+   ```
+
+   `HANDY_DISABLE_UPDATER=1` turns off update checks so the official updater can't replace this build. `createUpdaterArtifacts: false` skips update packaging, which needs the upstream signing key.
+
+3. Quit any running Handy, then copy `src-tauri/target/release/bundle/macos/Handy.app` into `/Applications`.
+4. Open Handy and grant **Microphone** and **Accessibility** when asked. If Accessibility was granted to an earlier build, reset it first (local builds are ad-hoc signed, so macOS treats each build as a new app):
+
+   ```bash
+   tccutil reset Accessibility com.pais.handy
+   ```
+
+5. During onboarding, pick a transcription model. **Parakeet Unified EN 0.6B** is the best choice for English. Use **Nemotron Streaming** if you dictate in several languages.
+
+### Set up post-processing (Ollama)
+
+1. Install [Ollama](https://ollama.com/download) (keep it updated; newer models need a recent version) and download the model:
+
+   ```bash
+   ollama pull gemma4:e4b
+   ```
+
+   `gemma4:e4b` passed every Smart Format and command-mode check in local testing and answers in under a second on an M-series Mac. Larger models work too; very small ones (e.g. `llama3.2`) tend to answer questions instead of cleaning them up.
+
+2. Optional, to avoid a slow first request after Ollama unloads the model:
+
+   ```bash
+   launchctl setenv OLLAMA_KEEP_ALIVE 1h
+   ```
+
+   Then quit and reopen Ollama.
+
+3. In Handy:
+   - **Settings** → turn on **Post-processing**.
+   - **Post Process → Provider**: **Custom**, Base URL `http://localhost:11434/v1`, no API key.
+   - **Model**: click refresh and pick `gemma4:e4b`.
+   - **Prompt**: select **Smart Format (Wispr-style)**.
+   - **Hotkey**: set **Post-Processing Hotkey** to a single key such as **Left Option** (hold to talk). Make sure no other shortcut uses the same key: one key press would trigger every binding on it.
+   - **Advanced → Custom Words**: add names and terms you use often.
+
+Ollama must be running for cleanup and command mode. Without it, Handy still pastes the raw transcription and command mode leaves your text unchanged.
+
+### Rebuilding and updating
+
+- Rebuild with the same command, then replace the app in `/Applications`.
+- Settings, prompts, app rules, shortcuts and history live in `~/Library/Application Support/com.pais.handy/`, not inside the app, so they survive every rebuild. Transcription models live in `~/.cache/huggingface` and are shared too.
+- After each rebuild, re-grant Accessibility (run the `tccutil reset` command above, then open Handy).
+- Built-in prompts are copied into your settings once. If the built-in Smart Format text changes in a later commit, your saved copy is not updated automatically; edit it under Post Process → Prompt.
+
+### Sharing a build
+
+A built `Handy.app` can be zipped and copied to another **Apple silicon** Mac (it does not run on Intel Macs). Because it is not notarized, macOS blocks the first launch: right-click the app → **Open** → **Open**, or run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Handy.app
+```
+
+The new Mac then needs the permissions, a transcription model and the post-processing setup above. Settings do not travel with the app.
+
+### Development
+
+```bash
+CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri:dev
+```
+
+Runs as "Handy Dev" (`com.pais.handy.dev`) with separate settings. Quit the installed Handy while testing, since both use the same default shortcuts.
+
 ## Why Handy?
 
 Handy was created to fill the gap for a truly open source, extensible speech-to-text tool. As stated on [handy.computer](https://handy.computer):
