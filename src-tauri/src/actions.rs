@@ -335,7 +335,7 @@ fn append_custom_words_glossary(prompt: String, custom_words: &[String]) -> Stri
 /// punctuation (or at the start) and before punctuation or the end.
 static SPOKEN_BREAK_AFTER_PUNCTUATION: Lazy<regex::Regex> = Lazy::new(|| {
     regex::Regex::new(
-        r"(?P<pre>^|[.!?,;:])\s*(?i:new\s+(?P<kind>line|paragraph))\s*(?:[.!?,;:]+|$)\s*",
+        r"(?P<pre>^|[.!?,;:])\s*(?i:new\s*(?P<kind>line|paragraph))\s*(?:[.!?,;:]+|$)\s*",
     )
     .expect("valid spoken line break pattern")
 });
@@ -344,7 +344,7 @@ static SPOKEN_BREAK_AFTER_PUNCTUATION: Lazy<regex::Regex> = Lazy::new(|| {
 /// New line. Thanks"). Requiring the capital and trailing punctuation keeps
 /// ordinary phrases like "a new line of products" intact.
 static SPOKEN_BREAK_CAPITALIZED: Lazy<regex::Regex> = Lazy::new(|| {
-    regex::Regex::new(r"\s+New\s+(?P<kind>(?i:line|paragraph))\s*(?:[.!?,;:]+|$)\s*")
+    regex::Regex::new(r"\s+New\s*(?P<kind>(?i:line|paragraph))\s*(?:[.!?,;:]+|$)\s*")
         .expect("valid spoken line break pattern")
 });
 
@@ -1355,6 +1355,10 @@ mod tests {
             "Hi Sara\nThanks for update"
         );
         assert_eq!(
+            apply_spoken_line_breaks("Hi Sarah Newline. Thanks for the update. Newline. Bye"),
+            "Hi Sarah\nThanks for the update.\nBye"
+        );
+        assert_eq!(
             apply_spoken_line_breaks("Hi John, new paragraph, I wanted to follow up. New line"),
             "Hi John,\n\nI wanted to follow up."
         );
@@ -1367,6 +1371,7 @@ mod tests {
             "Thanks. New line of products launched today.",
             "the new paragraph reads better",
             "Draw a new line here.",
+            "Add a newline character.",
         ] {
             assert_eq!(apply_spoken_line_breaks(text), text);
         }
