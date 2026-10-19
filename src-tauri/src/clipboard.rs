@@ -126,6 +126,22 @@ fn restore_clipboard(
     }
 }
 
+/// Sends the copy keystroke from the main thread and waits for it. Resolving
+/// the layout's C key goes through Text Input Sources, which macOS only allows
+/// on the main thread (it traps otherwise), so this must not run inline on the
+/// coordinator thread that starts command mode.
+fn send_copy_on_main_thread(app_handle: &AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = app_handle.clone();
+    app_handle
+        .run_on_main_thread(move || {
+            let _ = tx.send(with_enigo(&handle, input::send_copy_ctrl_c));
+        })
+        .map_err(|e| format!("Failed to run copy on main thread: {}", e))?;
+    rx.recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "Timed out sending the copy keystroke".to_string())?
+}
+
 /// How long to wait for the target app to answer the copy keystroke.
 const SELECTION_COPY_TIMEOUT: Duration = Duration::from_millis(400);
 
@@ -143,7 +159,7 @@ pub fn capture_selection(app_handle: &AppHandle) -> Result<Option<String>, Strin
 
     // Start from an empty clipboard so an unchanged clipboard means "no selection".
     let _ = clipboard.clear();
-    let copy_result = with_enigo(app_handle, input::send_copy_ctrl_c);
+    let copy_result = send_copy_on_main_thread(app_handle);
 
     let mut selection = None;
     if copy_result.is_ok() {
