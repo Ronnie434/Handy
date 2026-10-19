@@ -331,6 +331,36 @@ fn append_custom_words_glossary(prompt: String, custom_words: &[String]) -> Stri
     }
 }
 
+/// "New line" / "new paragraph" said as its own clause: after sentence
+/// punctuation (or at the start) and before punctuation or the end.
+static SPOKEN_BREAK_AFTER_PUNCTUATION: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?P<pre>^|[.!?,;:])\s*(?i:new\s+(?P<kind>line|paragraph))\s*(?:[.!?,;:]+|$)\s*",
+    )
+    .expect("valid spoken line break pattern")
+});
+
+/// The same command mid-sentence, which speech models capitalize ("Hi Sarah
+/// New line. Thanks"). Requiring the capital and trailing punctuation keeps
+/// ordinary phrases like "a new line of products" intact.
+static SPOKEN_BREAK_CAPITALIZED: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"\s+New\s+(?P<kind>(?i:line|paragraph))\s*(?:[.!?,;:]+|$)\s*")
+        .expect("valid spoken line break pattern")
+});
+
+/// Replaces spoken "new line" / "new paragraph" commands with real line breaks.
+fn apply_spoken_line_breaks(text: &str) -> String {
+    let replace = |caps: &regex::Captures| {
+        let pre = caps.name("pre").map_or("", |m| m.as_str());
+        let kind = caps["kind"].to_ascii_lowercase();
+        let brk = if kind == "paragraph" { "\n\n" } else { "\n" };
+        format!("{pre}{brk}")
+    };
+    let text = SPOKEN_BREAK_AFTER_PUNCTUATION.replace_all(text, replace);
+    let text = SPOKEN_BREAK_CAPITALIZED.replace_all(&text, replace);
+    text.trim().to_string()
+}
+
 /// Returns `true` when a transcription has no meaningful content to
 /// post-process (empty or whitespace-only). Used to skip the post-processing
 /// LLM call when nothing was actually transcribed, which would otherwise make
@@ -634,7 +664,13 @@ pub(crate) async fn process_transcription_output(
     app_id: Option<&str>,
 ) -> ProcessedTranscription {
     let settings = get_settings(app);
-    let mut final_text = transcription.to_string();
+    // Turn spoken "new line" commands into real breaks before the LLM sees
+    // the text; models tend to keep the words instead.
+    let mut final_text = if post_process {
+        apply_spoken_line_breaks(transcription)
+    } else {
+        transcription.to_string()
+    };
     let mut post_processed_text: Option<String> = None;
     let mut post_process_prompt: Option<String> = None;
 
@@ -1216,9 +1252,9 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        append_custom_words_glossary, build_command_mode_user_content, build_system_prompt,
-        complete_unless_cancelled, custom_words_glossary, is_blank_transcription,
-        should_use_streaming_overlay, strip_think_block, CommandModeIssue,
+        append_custom_words_glossary, apply_spoken_line_breaks, build_command_mode_user_content,
+        build_system_prompt, complete_unless_cancelled, custom_words_glossary,
+        is_blank_transcription, should_use_streaming_overlay, strip_think_block, CommandModeIssue,
     };
     use crate::settings::OverlayStyle;
     use std::future;
@@ -1304,6 +1340,36 @@ mod tests {
             append_custom_words_glossary("Transcript: hi".to_string(), &[]),
             "Transcript: hi"
         );
+    }
+
+    #[test]
+    fn spoken_new_line_commands_become_breaks() {
+        assert_eq!(
+            apply_spoken_line_breaks(
+                "Hi Sarah. New line. Thanks for the update. New line. See you tomorrow"
+            ),
+            "Hi Sarah.\nThanks for the update.\nSee you tomorrow"
+        );
+        assert_eq!(
+            apply_spoken_line_breaks("Hi Sara New line. Thanks for update"),
+            "Hi Sara\nThanks for update"
+        );
+        assert_eq!(
+            apply_spoken_line_breaks("Hi John, new paragraph, I wanted to follow up. New line"),
+            "Hi John,\n\nI wanted to follow up."
+        );
+    }
+
+    #[test]
+    fn ordinary_new_line_phrases_are_kept() {
+        for text in [
+            "We launched a new line of products.",
+            "Thanks. New line of products launched today.",
+            "the new paragraph reads better",
+            "Draw a new line here.",
+        ] {
+            assert_eq!(apply_spoken_line_breaks(text), text);
+        }
     }
 
     #[test]
