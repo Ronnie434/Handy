@@ -818,10 +818,11 @@ fn default_model_for_provider(provider_id: &str) -> String {
 }
 
 /// Provider and model a fresh install uses: the custom provider defaults to a
-/// local Ollama server, and this model handled every Smart Format and command
-/// mode case in testing while answering in under a second.
+/// local Ollama server. The quantization-aware text-only Gemma 4 build matches
+/// the full `gemma4:e4b` on Smart Format and command mode while using about
+/// 6.5 GB of memory instead of 9-11 GB, and its usage does not grow over time.
 const FRESH_INSTALL_PROVIDER_ID: &str = "custom";
-const FRESH_INSTALL_MODEL: &str = "gemma4:e4b";
+const FRESH_INSTALL_MODEL: &str = "gemma4:e4b-it-qat";
 
 fn fresh_install_post_process_models() -> HashMap<String, String> {
     let mut models = default_post_process_models();
@@ -2019,7 +2020,7 @@ mod tests {
                 .post_process_models
                 .get("custom")
                 .map(String::as_str),
-            Some("gemma4:e4b")
+            Some("gemma4:e4b-it-qat")
         );
         assert_eq!(
             settings.post_process_selected_prompt_id.as_deref(),

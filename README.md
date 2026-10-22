@@ -51,16 +51,16 @@ This fork adds Wispr Flow-style features on top of Handy's LLM post-processing. 
 1. Install [Ollama](https://ollama.com/download) (keep it updated; newer models need a recent version) and download the model:
 
    ```bash
-   ollama pull gemma4:e4b
+   ollama pull gemma4:e4b-it-qat
    ```
 
-   `gemma4:e4b` passed every Smart Format and command-mode check in local testing and answers in under a second on an M-series Mac. Larger models work too; very small ones (e.g. `llama3.2`) tend to answer questions instead of cleaning them up.
+   `gemma4:e4b-it-qat` is a compressed, text-only build of Gemma 4. In local testing (26 cleanup and command cases) it matched the full `gemma4:e4b` while using about 6.5 GB of memory instead of 9-11 GB, and it answers in about a second on an M-series Mac. Smaller models (Qwen 3.5 2B/4B, Gemma 3 4B, Phi-4 mini, Llama 3.2, Granite 4, Ministral 3) saved memory but answered questions, followed dictated instructions or skipped lists and corrections.
 
-2. Ollama unloads the model 5 minutes after its last use, which frees its memory (about 9.5 GB for `gemma4:e4b`). The first dictation after a longer break waits 10-20 seconds while the model loads again.
+2. Ollama unloads the model 5 minutes after its last use, which frees its memory (about 6.5 GB for `gemma4:e4b-it-qat`). The first dictation after a longer break waits 10-20 seconds while the model loads again.
 
 3. In Handy:
-   - **Fresh installs need nothing else.** They start with post-processing on, provider **Custom** (Ollama at `http://localhost:11434/v1`), model `gemma4:e4b` and the **Smart Format (Wispr-style)** prompt selected. Hold **Option+Shift+Space** to dictate with cleanup, or select text first to give a command.
-   - **Existing installs** (settings from an earlier Handy) keep their own choices. Set them once: **Settings** → turn on **Post-processing**; **Post Process → Provider** **Custom** with Base URL `http://localhost:11434/v1` and no API key; **Model** → refresh and pick `gemma4:e4b`; **Prompt** → **Smart Format (Wispr-style)**.
+   - **Fresh installs need nothing else.** They start with post-processing on, provider **Custom** (Ollama at `http://localhost:11434/v1`), model `gemma4:e4b-it-qat` and the **Smart Format (Wispr-style)** prompt selected. Hold **Option+Shift+Space** to dictate with cleanup, or select text first to give a command.
+   - **Existing installs** (settings from an earlier Handy) keep their own choices. Set them once: **Settings** → turn on **Post-processing**; **Post Process → Provider** **Custom** with Base URL `http://localhost:11434/v1` and no API key; **Model** → refresh and pick `gemma4:e4b-it-qat`; **Prompt** → **Smart Format (Wispr-style)**.
    - Optional: set **Post-Processing Hotkey** to a single key such as **Left Option** (hold to talk). Make sure no other shortcut uses the same key: one key press would trigger every binding on it.
    - Optional: **Advanced → Custom Words** for names and terms you use often.
 
