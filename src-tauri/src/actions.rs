@@ -382,6 +382,19 @@ fn build_system_prompt(prompt_template: &str, custom_words: &[String]) -> String
     append_custom_words_glossary(prompt, custom_words)
 }
 
+/// Spoken "new line" commands become real breaks before the LLM sees the
+/// text, but small local models join the lines back up (Smart Format even asks
+/// for short dictation on one line). When the transcript has breaks, tell the
+/// model they are the speaker's and must stay.
+fn with_line_break_rule(prompt: String, transcription: &str) -> String {
+    if !transcription.contains('\n') {
+        return prompt;
+    }
+    format!("{prompt}\n\n{LINE_BREAK_RULE}")
+}
+
+const LINE_BREAK_RULE: &str = "The transcript already contains line breaks that the speaker dictated. Keep every one of them, at the same place, in your output: do not join those lines into one.";
+
 /// Glossary telling the LLM how the user's custom words are spelled, or `None`
 /// when there are no non-blank custom words. One term per line so terms that
 /// contain commas or quotes stay unambiguous.
@@ -565,6 +578,7 @@ async fn post_process_transcription(
         debug!("Post-processing skipped because the selected prompt is empty");
         return PostProcessOutcome::Failed;
     }
+    let prompt = with_line_break_rule(prompt, transcription);
 
     debug!(
         "Starting LLM post-processing with provider '{}' (model: {})",
@@ -1505,8 +1519,8 @@ mod tests {
         append_custom_words_glossary, apply_spoken_line_breaks, build_command_mode_user_content,
         build_system_prompt, complete_unless_cancelled, custom_words_glossary,
         is_blank_transcription, non_blank_post_processed_text, post_process_transcription,
-        should_use_streaming_overlay, strip_invisible_chars, strip_think_block, CommandModeIssue,
-        PostProcessOutcome,
+        should_use_streaming_overlay, strip_invisible_chars, strip_think_block,
+        with_line_break_rule, CommandModeIssue, PostProcessOutcome, LINE_BREAK_RULE,
     };
     use crate::settings::{get_default_settings, AppSettings, OverlayStyle};
     use std::future;
@@ -1834,5 +1848,20 @@ mod tests {
         assert!(!should_use_streaming_overlay(OverlayStyle::Live, false));
         assert!(!should_use_streaming_overlay(OverlayStyle::Minimal, true));
         assert!(!should_use_streaming_overlay(OverlayStyle::None, true));
+    }
+
+    #[test]
+    fn dictated_line_breaks_are_pinned_in_the_prompt() {
+        let prompt = with_line_break_rule("Clean it.".to_string(), "Hi Sarah.\nThanks");
+        assert!(prompt.starts_with("Clean it.\n\n"));
+        assert!(prompt.ends_with(LINE_BREAK_RULE));
+    }
+
+    #[test]
+    fn single_line_dictation_keeps_the_prompt() {
+        assert_eq!(
+            with_line_break_rule("Clean it.".to_string(), "Hi Sarah, thanks"),
+            "Clean it."
+        );
     }
 }
