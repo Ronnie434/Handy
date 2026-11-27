@@ -10,7 +10,8 @@ use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::{Transcription, TranscriptionManager};
 use crate::notices::{self, Notice, NoticeCode, NoticeSource};
 use crate::settings::{
-    get_settings, AppSettings, OverlayStyle, PostProcessProvider, APPLE_INTELLIGENCE_PROVIDER_ID,
+    get_settings, AppSettings, OverlayStyle, PostProcessApiFormat, PostProcessProvider,
+    APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
@@ -578,8 +579,6 @@ async fn post_process_transcription(
         debug!("Post-processing skipped because the selected prompt is empty");
         return PostProcessOutcome::Failed;
     }
-    let prompt = with_line_break_rule(prompt, transcription);
-
     debug!(
         "Starting LLM post-processing with provider '{}' (model: {})",
         provider.id, model
@@ -599,7 +598,10 @@ async fn post_process_transcription(
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
 
-        let system_prompt = build_system_prompt(&prompt, &settings.custom_words);
+        let system_prompt = with_line_break_rule(
+            build_system_prompt(&prompt, &settings.custom_words),
+            transcription,
+        );
         let user_content = transcription.to_string();
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
@@ -713,22 +715,47 @@ async fn post_process_transcription(
         }
     }
 
-    // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = append_custom_words_glossary(
-        prompt.replace("${output}", transcription),
-        &settings.custom_words,
-    );
-    debug!("Processed prompt length: {} chars", processed_prompt.len());
+    let result = if sends_instructions_first(&provider) {
+        // The instructions go first, as the system message, and the transcript
+        // after them. A local server keeps the start of the last prompt
+        // computed, so every dictation reuses the instructions' work: about
+        // 1.2 s down to 0.3 s per request for gemma4 on Ollama.
+        let system_prompt = with_line_break_rule(
+            build_system_prompt(&prompt, &settings.custom_words),
+            transcription,
+        );
+        crate::llm_client::send_chat_completion_with_schema(
+            &provider,
+            api_key,
+            &model,
+            transcription.to_string(),
+            Some(system_prompt),
+            None,
+            disable_reasoning,
+        )
+        .await
+    } else {
+        // Legacy mode: Replace ${output} variable in the prompt with the actual text
+        let processed_prompt = with_line_break_rule(
+            append_custom_words_glossary(
+                prompt.replace("${output}", transcription),
+                &settings.custom_words,
+            ),
+            transcription,
+        );
+        debug!("Processed prompt length: {} chars", processed_prompt.len());
 
-    match crate::llm_client::send_chat_completion(
-        &provider,
-        api_key,
-        &model,
-        processed_prompt,
-        disable_reasoning,
-    )
-    .await
-    {
+        crate::llm_client::send_chat_completion(
+            &provider,
+            api_key,
+            &model,
+            processed_prompt,
+            disable_reasoning,
+        )
+        .await
+    };
+
+    match result {
         Ok(Some(content)) => {
             let content = strip_invisible_chars(strip_think_block(&content));
             debug!(
@@ -752,6 +779,73 @@ async fn post_process_transcription(
         }
     }
 }
+
+/// Whether this provider runs on the user's machine (the "custom" provider,
+/// e.g. Ollama or LM Studio). Only a local server has a model to load and a
+/// prompt cache that this one user's dictations share, so only it gets the
+/// instructions-first layout and the warm-up request.
+fn sends_instructions_first(provider: &PostProcessProvider) -> bool {
+    provider.id == LOCAL_PROVIDER_ID && provider.api_format != PostProcessApiFormat::Anthropic
+}
+
+const LOCAL_PROVIDER_ID: &str = "custom";
+
+/// Asks a local post-processing server to load its model and read the
+/// instructions while the user is still speaking, so the request that follows
+/// the recording doesn't wait for either. Ollama unloads an idle model after 5
+/// minutes, and loading it again took 3 s or more before the first dictation.
+/// Fire and forget: a failure only means no head start.
+fn warm_up_post_processing(app: &AppHandle, command_mode: bool) {
+    let settings = get_settings(app);
+    let Some((provider, model)) = configured_llm(&settings) else {
+        return;
+    };
+    if !sends_instructions_first(&provider) {
+        return;
+    }
+    let template = if command_mode {
+        Some(settings.command_mode_prompt.clone())
+    } else {
+        let app_id = crate::frontmost_app::last_detected().map(|app| app.id);
+        resolve_post_process_prompt_id(&settings, app_id.as_deref()).and_then(|id| {
+            settings
+                .post_process_prompts
+                .iter()
+                .find(|prompt| prompt.id == id)
+                .map(|prompt| prompt.prompt.clone())
+        })
+    };
+    let Some(template) = template.filter(|t| !t.trim().is_empty()) else {
+        return;
+    };
+    let system_prompt = build_system_prompt(&template, &settings.custom_words);
+    let api_key = settings
+        .post_process_api_keys
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        match crate::llm_client::send_chat_completion_with_schema(
+            &provider,
+            api_key,
+            &model,
+            WARM_UP_TEXT.to_string(),
+            Some(system_prompt),
+            None,
+            true,
+        )
+        .await
+        {
+            Ok(_) => debug!("Post-processing model warmed up in {:?}", started.elapsed()),
+            Err(e) => debug!("Post-processing warm-up failed: {}", e),
+        }
+    });
+}
+
+/// What the warm-up asks the model to clean: short, so it answers in a few
+/// tokens and is done before a real request arrives.
+const WARM_UP_TEXT: &str = "hi";
 
 /// Picks the prompt for this recording: the app rule matching the app that was
 /// frontmost when recording started, otherwise the selected prompt.
@@ -854,6 +948,10 @@ impl ShortcutAction for TranscribeAction {
 
         if self.command_mode && !command_mode_available(app) {
             return;
+        }
+
+        if self.post_process || self.command_mode {
+            warm_up_post_processing(app, self.command_mode);
         }
 
         // Load model in the background
@@ -1863,5 +1961,14 @@ mod tests {
             with_line_break_rule("Clean it.".to_string(), "Hi Sarah, thanks"),
             "Clean it."
         );
+    }
+
+    #[test]
+    fn only_the_local_provider_sends_instructions_first() {
+        let providers = get_default_settings().post_process_providers;
+        let by_id = |id: &str| providers.iter().find(|p| p.id == id).unwrap();
+        assert!(super::sends_instructions_first(by_id("custom")));
+        assert!(!super::sends_instructions_first(by_id("openrouter")));
+        assert!(!super::sends_instructions_first(by_id("openai")));
     }
 }
