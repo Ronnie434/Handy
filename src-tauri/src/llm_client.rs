@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -226,13 +227,75 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     Ok(headers)
 }
 
-/// Create an HTTP client with provider-specific headers
-fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwest::Client, String> {
-    let headers = build_headers(provider, api_key)?;
-    reqwest::Client::builder()
-        .default_headers(headers)
+/// HTTP client with provider-specific headers. The headers are set per
+/// request, so every instance can share one connection pool and consecutive
+/// requests reuse an open connection instead of a new TCP + TLS handshake.
+struct ProviderClient {
+    client: &'static reqwest::Client,
+    headers: HeaderMap,
+}
+
+impl ProviderClient {
+    fn post(&self, url: &str) -> reqwest::RequestBuilder {
+        self.client.post(url).headers(self.headers.clone())
+    }
+
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        self.client.get(url).headers(self.headers.clone())
+    }
+}
+
+/// Whether the URL points at this machine. reqwest has no built-in proxy
+/// bypass for loopback, so a system proxy would otherwise capture requests to
+/// a local server.
+fn is_loopback(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Process-wide clients, one that follows the system proxy and one that
+/// connects directly for loopback providers. A short idle timeout and TCP
+/// keepalive keep the pool from handing out connections that died during sleep
+/// or a network change.
+fn shared_client(base_url: &str) -> Result<&'static reqwest::Client, String> {
+    static PROXIED: OnceLock<reqwest::Client> = OnceLock::new();
+    static DIRECT: OnceLock<reqwest::Client> = OnceLock::new();
+    let direct = is_loopback(base_url);
+    let cell = if direct { &DIRECT } else { &PROXIED };
+    if let Some(client) = cell.get() {
+        return Ok(client);
+    }
+    let mut builder = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(10));
+    if direct {
+        builder = builder.no_proxy();
+    }
+    let client = builder
         .build()
-        .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
+        .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))?;
+    Ok(cell.get_or_init(|| client))
+}
+
+/// Create an HTTP client with provider-specific headers
+fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<ProviderClient, String> {
+    Ok(ProviderClient {
+        client: shared_client(&provider.base_url)?,
+        headers: build_headers(provider, api_key)?,
+    })
 }
 
 /// Format a bounded error source chain.
@@ -612,6 +675,7 @@ pub async fn fetch_models(
 
     let response = client
         .get(&url)
+        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| report_reqwest_error("Failed to fetch models", &e))?;
@@ -764,6 +828,28 @@ mod tests {
     fn log_url_sanitization_removes_credentials_and_tokens() {
         let url = "https://user:password@example.com/v1/models?api_key=secret#private";
         assert_eq!(sanitized_url_for_log(url), "https://example.com/v1/models");
+    }
+
+    #[test]
+    fn loopback_base_urls_bypass_the_proxy() {
+        for url in [
+            "http://localhost:8080/v1",
+            "http://LOCALHOST:8080/v1",
+            "http://llm.localhost/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.1.2.3/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            assert!(is_loopback(url), "{url} should be loopback");
+        }
+        for url in [
+            "https://api.openai.com/v1",
+            "http://192.168.1.5:8080/v1",
+            "http://localhost.example.com/v1",
+            "not a URL",
+        ] {
+            assert!(!is_loopback(url), "{url} should not be loopback");
+        }
     }
 
     #[test]
